@@ -171,12 +171,33 @@ func (vt *VT) pipeChunk(data []byte, onData func()) {
 	vt.RespondTerminalQueries(data)
 	vt.LastOut = time.Now()
 	vt.Vt.Write(data)
+	vt.clampLiveVtHeight()
 	if vt.Scrollback != nil {
 		vt.Scrollback.Write(data)
 	}
 	vt.ScanPTYOutput(data)
 	if !vt.SyncOutputActive {
 		onData()
+	}
+}
+
+// clampLiveVtHeight defends against the live VT growing past ChildRows.
+// midterm's Resize-bound terminal already gates ensureHeight on AutoResizeY,
+// but this guard catches any surviving grow paths (third-party midterm
+// changes, unforeseen handlers) before they corrupt rendering: renderLiveView
+// anchors a ChildRows-sized window to Cursor.Y, so a grown Height lets the
+// cursor walk into rows the renderer never reveals, hiding content above the
+// slid window until the next SIGWINCH-driven Resize.
+//
+// Re-clamping via Resize truncates Content to ChildRows and clamps MaxY.
+// Cheap when no growth happened (Height already == ChildRows is a no-op past
+// the early-return in midterm's resize). Must be called with vt.Mu held.
+func (vt *VT) clampLiveVtHeight() {
+	if vt.Vt == nil || vt.ChildRows <= 0 {
+		return
+	}
+	if vt.Vt.Height > vt.ChildRows {
+		vt.Vt.Resize(vt.ChildRows, vt.Cols)
 	}
 }
 

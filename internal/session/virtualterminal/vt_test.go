@@ -1,6 +1,7 @@
 package virtualterminal
 
 import (
+	"io"
 	"os"
 	"sync"
 	"testing"
@@ -482,6 +483,94 @@ func TestPipeChunk_MutexReleasedOnPanic(t *testing.T) {
 
 	// Mutex should be available.
 	assertMutexAvailable(t, &vt.Mu)
+}
+
+// --- Live VT height clamp (defense in depth) ---
+
+// TestPipeChunk_LiveVtHeightClamped verifies that the live VT's Height never
+// exceeds ChildRows after a chunk is processed, even when the chunk contains
+// sequences that historically grew midterm's Height past the configured size.
+//
+// The bug this guards against: if Vt.Height grows past ChildRows,
+// renderLiveView's `startRow = Cursor.Y - ChildRows + 1` slides the rendered
+// window past content that's still in Vt.Content but never reaches the user.
+// The user then sees content disappear into "thin air" until the next
+// SIGWINCH-driven Resize re-clamps Height.
+//
+// midterm itself now gates ensureHeight on AutoResizeY, so this is a
+// belt-and-suspenders check. Future midterm refactors or additional grow
+// paths cannot silently regress h2 rendering.
+func TestPipeChunk_LiveVtHeightClamped(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{
+			"insertLines (CSI L) past height",
+			[]byte("\033[10;1H\033[5L"),
+		},
+		{
+			"absolute goto then text past height",
+			[]byte("\033[99;1Hx"),
+		},
+		{
+			"newlines + cursor home + redraw cycle (Claude Code pattern)",
+			func() []byte {
+				var b []byte
+				for i := 0; i < 100; i++ {
+					b = append(b, []byte("line\r\n")...)
+				}
+				b = append(b, []byte("\033[H")...)
+				for i := 0; i < 5; i++ {
+					b = append(b, []byte("redraw\r\n")...)
+				}
+				return b
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vt := &VT{
+				ChildRows: 10,
+				Cols:      80,
+				Vt:        midterm.NewTerminal(10, 80),
+				Output:    io.Discard,
+			}
+			vt.pipeChunk(tc.data, func() {})
+
+			if vt.Vt.Height > vt.ChildRows {
+				t.Fatalf("Vt.Height=%d exceeds ChildRows=%d", vt.Vt.Height, vt.ChildRows)
+			}
+			if len(vt.Vt.Content) > vt.ChildRows {
+				t.Fatalf("len(Vt.Content)=%d exceeds ChildRows=%d",
+					len(vt.Vt.Content), vt.ChildRows)
+			}
+		})
+	}
+}
+
+// TestClampLiveVtHeight_Idempotent verifies that the clamp is a no-op when
+// Vt.Height already matches ChildRows (the steady-state hot path).
+func TestClampLiveVtHeight_Idempotent(t *testing.T) {
+	vt := &VT{
+		ChildRows: 10,
+		Cols:      80,
+		Vt:        midterm.NewTerminal(10, 80),
+	}
+	for i := 0; i < 5; i++ {
+		vt.clampLiveVtHeight()
+		if vt.Vt.Height != 10 {
+			t.Fatalf("iter %d: Height=%d, want 10", i, vt.Vt.Height)
+		}
+	}
+}
+
+// TestClampLiveVtHeight_NoVtNoCrash guards against nil Vt or zero ChildRows
+// during early lifecycle (initVT before the first PTY chunk).
+func TestClampLiveVtHeight_NoVtNoCrash(t *testing.T) {
+	(&VT{}).clampLiveVtHeight()
+	(&VT{ChildRows: 10}).clampLiveVtHeight()
 }
 
 func assertMutexAvailable(t *testing.T, mu *sync.Mutex) {
