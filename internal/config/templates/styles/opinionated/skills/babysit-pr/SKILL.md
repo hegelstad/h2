@@ -50,6 +50,23 @@ gh pr checks <pr-number>
 - All green → continue to 2b.
 - Failing → run the failing job, read the error, **push a fix**. Most CI failures are: type errors, lint errors, broken unit tests. Fix them locally, run the local equivalent (`make lint`, `make typecheck`, `make test` — whatever the repo uses), then `git push`. End turn — let the next wakeup re-check.
 
+**If you see `Resource not accessible by personal access token`** — `gh pr checks` and `gh api repos/.../commits/<sha>/check-runs` go through the GitHub Checks API, which a fine-grained PAT often can't read. Two fallbacks work with the same token:
+
+```bash
+# Workflow runs for the branch — works under PATs.
+gh run list --branch <branch> --limit 40 \
+    --json status,conclusion,name,headSha \
+    --jq '[.[] | select(.headSha == "<head-sha>")] |
+          group_by(.name) |
+          map({name: .[0].name, status: .[0].status, conclusion: .[0].conclusion})'
+
+# Legacy combined commit status (covers anything reporting via the Statuses API).
+gh api "repos/<org>/<repo>/commits/<head-sha>/status" \
+    --jq '{state, statuses: [.statuses[] | {context, state, description}]}'
+```
+
+Use both: `gh run list` for Actions workflows, the combined-status call for external CIs (CircleCI, Vercel, Buildkite, etc.) that report via Statuses. Stop reaching for `gh pr checks` once you've hit the 403 — it won't start working mid-loop.
+
 ### Step 2b — Pull review comments
 
 ```bash
