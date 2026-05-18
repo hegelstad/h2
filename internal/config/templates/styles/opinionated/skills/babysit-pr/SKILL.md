@@ -50,22 +50,37 @@ gh pr checks <pr-number>
 - All green → continue to 2b.
 - Failing → run the failing job, read the error, **push a fix**. Most CI failures are: type errors, lint errors, broken unit tests. Fix them locally, run the local equivalent (`make lint`, `make typecheck`, `make test` — whatever the repo uses), then `git push`. End turn — let the next wakeup re-check.
 
-**If you see `Resource not accessible by personal access token`** — `gh pr checks` and `gh api repos/.../commits/<sha>/check-runs` go through the GitHub Checks API, which a fine-grained PAT often can't read. Two fallbacks work with the same token:
+**Fine-grained personal access tokens can't read the GitHub Checks API.** If `gh` is authenticated with a fine-grained PAT (the default for most workstations — `gh auth status` will show the token type), every code path that touches Checks returns 403 `Resource not accessible by personal access token`. The token grants are not the problem; the Checks API simply isn't exposed to PATs. This will not start working mid-loop. Stop retrying and switch to the fallbacks below.
+
+Commands that **fail** under a PAT — avoid these for CI status:
+
+- `gh pr checks <pr>` — GraphQL `statusCheckRollup` path.
+- `gh pr view <pr> --json statusCheckRollup` (and any other `--json` field whose name contains `statusCheck` / `checkRuns`). The rest of the JSON still comes back, so it looks like it worked — but stderr is full of per-context 403s and the field you wanted is empty.
+- `gh api repos/<org>/<repo>/commits/<sha>/check-runs` — REST Checks API.
+- `gh api repos/<org>/<repo>/check-suites/...` — same family.
+
+Commands that **work** under a PAT — use these instead:
 
 ```bash
-# Workflow runs for the branch — works under PATs.
+# Actions workflow runs for the branch (covers anything running in GitHub Actions).
 gh run list --branch <branch> --limit 40 \
     --json status,conclusion,name,headSha \
     --jq '[.[] | select(.headSha == "<head-sha>")] |
           group_by(.name) |
           map({name: .[0].name, status: .[0].status, conclusion: .[0].conclusion})'
 
-# Legacy combined commit status (covers anything reporting via the Statuses API).
+# Legacy combined commit status (covers external CIs reporting via the Statuses API:
+# CircleCI, Vercel, Buildkite, etc.).
 gh api "repos/<org>/<repo>/commits/<head-sha>/status" \
     --jq '{state, statuses: [.statuses[] | {context, state, description}]}'
+
+# Failing-job logs — also works under a PAT.
+gh run view <run-id> --log-failed
 ```
 
-Use both: `gh run list` for Actions workflows, the combined-status call for external CIs (CircleCI, Vercel, Buildkite, etc.) that report via Statuses. Stop reaching for `gh pr checks` once you've hit the 403 — it won't start working mid-loop.
+Use both queries: `gh run list` for Actions, the combined-status call for external CIs. Together they reconstruct the same picture `gh pr checks` would have shown.
+
+Everything else you need for this skill works fine under a PAT — `gh pr view --json reviews,comments,body,...` (just not the check fields), `gh pr comment`, `gh api .../pulls/<n>/comments`, `gh api .../issues/<n>/comments`, `gh run view`, `gh run list`. Only the Checks API path is blocked.
 
 ### Step 2b — Pull review comments
 
