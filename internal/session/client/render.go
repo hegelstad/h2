@@ -164,9 +164,13 @@ func (c *Client) renderHistoryEntry(buf *bytes.Buffer, entry virtualterminal.Scr
 			lastFormat = f
 			first = false
 		}
-		if run.URL != lastURL {
-			writeOSC8BoundaryStr(buf, lastURL, run.URL)
-			lastURL = run.URL
+		// Sanitize before tracking so an unsafe URL is treated as no-link in
+		// the state machine — matches RenderLineFrom and avoids a stray
+		// end-of-row close when no open was emitted.
+		curURL := sanitizeOSC8URL(run.URL)
+		if curURL != lastURL {
+			writeOSC8BoundaryStr(buf, lastURL, curURL)
+			lastURL = curURL
 		}
 		contentEnd := end
 		if contentEnd > len(entry.Content) {
