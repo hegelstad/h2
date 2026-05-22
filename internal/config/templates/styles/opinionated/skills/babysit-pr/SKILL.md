@@ -1,6 +1,6 @@
 ---
 name: babysit-pr
-description: Schedule yourself to wake up every 5 minutes and shepherd an open PR — fix failing CI, address review-bot comments (push fixes for legit findings, resolve false positives, re-request review once addressed), reply to mechanical human comments with fixes, and flag architecture-level human comments back to the user. Exits the loop when the PR is green and review is clean. NEVER merges the PR.
+description: Schedule yourself to wake up every 5 minutes and shepherd an open PR — fix failing CI, address review-bot findings (push fixes and let the re-review pass close stale comments; resolve false positives and human-accepted threads yourself), reply to mechanical human comments with fixes, and flag architecture-level human comments back to the user. Goal is zero unresolved threads (each unresolved thread blocks mergeability). Exits when the PR is green and review is clean. NEVER merges the PR.
 user-invocable: true
 allowed-tools: Bash Read Write Edit Grep Glob Task
 argument-hint: "[pr-number-or-url] [--review-bot @name]"
@@ -16,6 +16,26 @@ This skill ends when the PR is green and review is clean. **It NEVER merges the 
 
 - `$0`: PR number or full URL (e.g. `123` or `https://github.com/org/repo/pull/123`).
 - `$1` (optional): `--review-bot @name` — the review bot you'll re-tag for follow-up reviews (e.g. `@bugbot`, `@claude`, `@greptile`, `@codex`). If omitted, infer from the bots that have already commented on the PR.
+
+## Prerequisites: the PAT this skill expects
+
+The `gh` CLI must be authenticated with a token whose grants match what this skill actually does — and, more importantly, *don't* permit what it must never do (merge).
+
+**Required grants:**
+
+- **`pull_requests: write`** — open/edit/comment on PRs, push commits to the branch, reply to review threads.
+- **`contents: read`** — clone, fetch, read files (for the local fix/push cycle).
+- **`actions: read`** — fetch workflow run logs to diagnose CI failures.
+- **`metadata: read`** — always required.
+
+**Must NOT have:**
+
+- **`contents: write`** — this would let the token push to the base branch and merge the PR. The skill's hard rule is "never merge"; remove the capability and the rule is harder to break by accident.
+- **`administration: write`** — bypassing branch protection, changing merge settings.
+
+Grant `pull_requests: write` (not `contents: write`) is the meaningful split: the skill needs to push commits to a feature branch and edit PR comments, both of which are covered by `pull_requests: write`. Merging requires `contents: write` on the base, which the skill never needs.
+
+**A known limitation regardless of grants:** GitHub's `resolveReviewThread` GraphQL mutation rejects fine-grained PATs by token *type*, returning `"Resource not accessible by personal access token"` even when `viewerCanResolve: true` is reported for the thread and the token has admin perms on the repo. Other PR mutations (e.g. `addComment`, `addPullRequestReviewComment`) work fine — only the resolve/unresolve mutations are blocked. If you hit this, post the inline disposition reply anyway and ask the user to click resolve in the UI; do not pretend the thread is closed.
 
 ## Phase 1: Set up the wakeup schedule
 
@@ -96,14 +116,31 @@ Group comments by author. The relevant authors are:
 
 ### Step 2c — Handle review-bot comments
 
-For each bot comment that isn't already resolved/handled:
+**The goal: zero unresolved threads.** Every open thread on a PR — bot or human — blocks merge under most branch-protection configs and clutters reviewer attention even when it doesn't. "Addressed" is not the same as "resolved." A thread with your reply "fixed in abc123" but no resolved-checkmark is still an open thread.
+
+For each bot comment that isn't already resolved:
 
 1. **Read it carefully.** Look at the file/line, understand what the bot is claiming.
-2. **Decide: false positive or legit?**
-   - **False positive** (bot misunderstood, claim doesn't apply, code is actually correct as-is): mark the comment resolved with a brief reason. Use `gh api` to mark the conversation resolved. **This is the only time you resolve a comment yourself.**
-   - **Legit** (bot is right, code should change): write the fix, push it. **DO NOT resolve the comment yourself.** Leave it open. The next review pass — when you re-tag the bot — is what verifies your fix actually addressed the concern. If you resolve it yourself, you're declaring "fixed" without verification.
 
-3. **Why this matters:** resolving a comment yourself short-circuits the verification loop. The whole point of the bot review is that it independently checks your work. Push fix → request re-review → bot reads new code → bot resolves OR flags new issues. That second pass is the safety check.
+2. **Pick a disposition:**
+
+   - **Legit, fixable** (bot is right, change the code): write the fix, push it. **Don't comment "Ok to resolve" yet** — wait for the bot's re-review (Step 2e). The happy path is: push fix → `@<bot> review` → bot reads new code → bot resolves the stale thread automatically. Posting your own "Ok to resolve" before the bot gets a chance defeats the verification step.
+
+   - **False positive** (bot misunderstood, claim doesn't apply, code is correct as-is): post a comment that *starts* with **`Ok to resolve`** followed by the one-line reason. Then resolve via `resolveReviewThread` if your auth permits; otherwise the user clicks resolve.
+
+   - **Accepted / won't fix** (bot's concern is valid but a human has decided not to change the code — out of scope, deferred, tradeoff already considered): post a comment starting with **`Ok to resolve`** and citing the human decision ("Per @<user>'s disposition above, accepting <X> because <Y>"). Then resolve / hand off to the user.
+
+3. **When the bot comes back after your fix (Step 2e), look at each thread again:**
+
+   - Bot resolved it → done.
+   - Bot left it open and didn't comment on it → bot saw your fix and didn't re-flag it. You may post **`Ok to resolve — addressed in <commit>`** and resolve.
+   - Bot left it open and posted a follow-up finding → not done. Either push more fix, or — if you and the bot disagree about what "fixed" means — flag the user and stop pinging the bot. Don't ping-pong.
+
+4. **The "Ok to resolve" lead matters.** When the user is the one clicking resolve (either because your auth can't, or because they're double-checking your work), they're scanning many threads at once. A comment that opens with `Ok to resolve — <reason>` is parseable in one glance. A comment that opens with "Fixed in c1cd83cdc via channel cap wrap_inbound…" makes them read the whole reasoning before they know whether to click. Lead with the verdict.
+
+5. **If `resolveReviewThread` returns FORBIDDEN:** this is the PAT-rejection limitation called out in the Prerequisites section — not a missing grant. Post the `Ok to resolve` reply anyway so the verdict is on-record. In your end-of-turn summary list the thread IDs and ask the user to click resolve. Don't pretend the thread is closed — it isn't until someone clicks the button.
+
+6. **Why this ordering matters:** resolving (or posting "Ok to resolve") *before* the bot has re-reviewed short-circuits the safety net — the whole point of the bot pass is independent verification. Leaving threads open *after* the bot has had its turn and disposition is decided is what creates a stuck PR. The middle path — push, re-tag, wait one cycle for the bot, then `Ok to resolve` whatever the bot didn't handle — is the one that actually drives the unresolved count to zero.
 
 ### Step 2d — Handle human comments
 
@@ -119,7 +156,11 @@ For each human comment that isn't already addressed:
 
 ### Step 2e — Re-request bot reviews
 
-If you pushed any fixes in 2c or 2d, re-request the relevant bot reviews so they see the new code:
+If you pushed any fixes in 2c or 2d, re-request the relevant bot reviews so they see the new code.
+
+**The trigger comment MUST stand alone.** Most review bots scan only for comments whose entire body is `@<bot> review` (sometimes with a trailing newline). They will NOT pick up a trigger appended to the end of a longer status update or summary comment — the bot's matcher sees the surrounding prose, decides it's not a command, and ignores it.
+
+Always send the trigger as its own `gh pr comment` call, with nothing else in the body:
 
 ```bash
 gh pr comment <pr-number> --body "@bugbot review"
@@ -127,7 +168,16 @@ gh pr comment <pr-number> --body "@claude review"
 # etc. for whichever bots are reviewing this PR
 ```
 
-Each bot has its own trigger phrase — the convention is `@<botname> review` for the most common ones. If you're not sure, look at how previous turns triggered the bot on this PR.
+Don't write:
+
+```bash
+# WRONG — bot won't see the trigger
+gh pr comment <pr-number> --body "Pushed fix in abc123. @cursor review"
+```
+
+Post your summary as one comment, then the trigger as a separate, single-line comment.
+
+Each bot has its own trigger phrase — the convention is `@<botname> review` for the most common ones. If you're not sure, look at how previous turns triggered the bot on this PR (and confirm it actually fired a new review afterward — silent failures from buried triggers look identical to bot down-time).
 
 ### Step 2f — End turn
 
@@ -137,9 +187,9 @@ Output a one-paragraph summary of what you did this tick (CI status, comments ad
 
 The PR is "clean" when:
 
-- All CI checks pass (`gh pr checks` is green).
-- No outstanding bot comments are unresolved (either you resolved a false positive, or you pushed a fix AND the bot's subsequent review approved/resolved it).
-- No outstanding human comments are unaddressed (you replied to mechanicals after pushing, or you flagged architecturals for user discussion).
+- All CI checks pass.
+- **Zero unresolved review threads.** Not "all addressed," not "all replied to" — actually marked resolved. GitHub's mergeable status checks the resolved flag, not whether a reply exists. If your PAT can't resolve them, the user has to click — surface that explicitly and don't claim the PR is clean while threads are still open.
+- No outstanding human comments are waiting on a decision from the user (architectural questions you flagged for them).
 
 When you confirm all of the above:
 
@@ -182,7 +232,11 @@ If you find yourself about to type `gh pr merge`, stop. That's not what this ski
 
 ## Anti-patterns
 
-- **Self-resolving bot comments after pushing a fix.** You're skipping the verification step that's the whole point of having a reviewer. Push the fix, leave the comment, re-tag the bot, let the next review verify.
+- **Posting "Ok to resolve" before the bot has had a chance to re-review.** You're skipping the verification step. Push, re-tag, wait one cycle, *then* resolve or hand off what the bot didn't pick up.
+- **Burying the verdict.** A long, well-reasoned inline reply that doesn't start with "Ok to resolve" forces the human clicking through to read the whole thing before they know what action to take. Lead with `Ok to resolve` (or `Pushed fix in <commit> — awaiting bot re-review` if you're still mid-cycle) so the verdict is the first thing they see.
+- **Leaving "human accepted / won't fix" threads open indefinitely** waiting for a bot resolution that will never come. The bot only resolves when code changes. If the disposition is "we're not changing this," you have to lead with `Ok to resolve` and the cited human decision.
+- **Confusing "replied" with "resolved."** A thread with your inline disposition reply is still an open thread until someone clicks resolve. Mergeability and reviewer attention both key on the resolved flag, not on whether a reply exists.
+- **Pinging the bot repeatedly without taking other action.** If you've tagged `@<bot> review` and ~10 minutes pass with no response, the bot may simply be slow or down — don't keep re-tagging. Move on to whatever else needs doing; the bot will catch up or it won't.
 - **Starting an architectural rewrite from a single review comment.** That's a much bigger commitment than this skill is sized for. Flag the user.
 - **Reaching the COUNT cap without converging and silently re-arming.** If you ran 20 cycles and the PR still isn't clean, something's stuck (loop with bot, flaky test, waiting on user). Stop and report — don't add another schedule.
 - **Editing the merge target.** All commits go on the PR branch. Don't touch `main` (or whatever the base is). The merge happens via the UI by a human, after this skill has ended.
