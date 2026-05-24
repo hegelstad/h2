@@ -39,15 +39,25 @@ If you reach the cap without converging, surface that to the user and stop. Do n
 
 ## Phase 2: What to do on each wakeup
 
-Each 5-minute wakeup, do these steps in order. Skip what's obviously not relevant (no new comments, no failing checks). Don't re-do work you've already done in a previous tick.
+Each 5-minute wakeup, do **every** step in order. Do not skip steps. If a step has no new work (e.g. no new comments since last tick), you can move through it quickly, but you must still check.
 
-### Step 2a — Check CI
+### Step 2a — Check for merge conflicts
+
+```bash
+gh pr view <pr-number> --json mergeable,mergeStateStatus
+```
+
+- `"mergeable": "MERGEABLE"` → continue to 2b.
+- `"mergeable": "CONFLICTING"` → the branch has fallen behind main. Fetch main, merge it into the PR branch, resolve conflicts, and push. For sops-encrypted files or other binary/generated files where both sides re-encrypted, take main's version (`git checkout --theirs <file>`) and note that re-encryption may be needed. For code conflicts, resolve normally. End turn after pushing the merge — let the next wakeup verify.
+- `"mergeable": "UNKNOWN"` → GitHub is still computing. Skip and check again next wakeup.
+
+### Step 2b — Check CI
 
 ```bash
 gh pr checks <pr-number>
 ```
 
-- All green → continue to 2b.
+- All green → continue to 2c.
 - Failing → run the failing job, read the error, **push a fix**. Most CI failures are: type errors, lint errors, broken unit tests. Fix them locally, run the local equivalent (`make lint`, `make typecheck`, `make test` — whatever the repo uses), then `git push`. End turn — let the next wakeup re-check.
 
 **Fine-grained personal access tokens can't read the GitHub Checks API.** If `gh` is authenticated with a fine-grained PAT (the default for most workstations — `gh auth status` will show the token type), every code path that touches Checks returns 403 `Resource not accessible by personal access token`. The token grants are not the problem; the Checks API simply isn't exposed to PATs. This will not start working mid-loop. Stop retrying and switch to the fallbacks below.
@@ -82,7 +92,7 @@ Use both queries: `gh run list` for Actions, the combined-status call for extern
 
 Everything else you need for this skill works fine under a PAT — `gh pr view --json reviews,comments,body,...` (just not the check fields), `gh pr comment`, `gh api .../pulls/<n>/comments`, `gh api .../issues/<n>/comments`, `gh run view`, `gh run list`. Only the Checks API path is blocked.
 
-### Step 2b — Pull review comments
+### Step 2c — Pull review comments
 
 ```bash
 gh pr view <pr-number> --json reviews,comments
@@ -94,7 +104,7 @@ Group comments by author. The relevant authors are:
 - **Review bots** — `@bugbot`, `@claude` (Claude Code review), `@codex`, `@greptile`, etc. Anything that looks programmatic.
 - **Humans** — everyone else.
 
-### Step 2c — Handle review-bot comments
+### Step 2d — Handle review-bot comments
 
 For each bot comment that isn't already resolved/handled:
 
@@ -105,7 +115,7 @@ For each bot comment that isn't already resolved/handled:
 
 3. **Why this matters:** resolving a comment yourself short-circuits the verification loop. The whole point of the bot review is that it independently checks your work. Push fix → request re-review → bot reads new code → bot resolves OR flags new issues. That second pass is the safety check.
 
-### Step 2d — Handle human comments
+### Step 2e — Handle human comments
 
 For each human comment that isn't already addressed:
 
@@ -117,9 +127,9 @@ For each human comment that isn't already addressed:
 
   Then continue processing other comments. If this thread is the only outstanding item, you'll still end the turn and wake up later — the user may have responded by then.
 
-### Step 2e — Re-request bot reviews
+### Step 2f — Re-request bot reviews
 
-If you pushed any fixes in 2c or 2d, re-request the relevant bot reviews so they see the new code:
+If you pushed any fixes in 2d or 2e, re-request the relevant bot reviews so they see the new code:
 
 ```bash
 gh pr comment <pr-number> --body "@bugbot review"
@@ -129,7 +139,7 @@ gh pr comment <pr-number> --body "@claude review"
 
 Each bot has its own trigger phrase — the convention is `@<botname> review` for the most common ones. If you're not sure, look at how previous turns triggered the bot on this PR.
 
-### Step 2f — End turn
+### Step 2g — End turn
 
 Output a one-paragraph summary of what you did this tick (CI status, comments addressed, fixes pushed, bots re-tagged), then end the turn. The next scheduled wakeup will arrive in 5 minutes.
 
@@ -137,7 +147,8 @@ Output a one-paragraph summary of what you did this tick (CI status, comments ad
 
 The PR is "clean" when:
 
-- All CI checks pass (`gh pr checks` is green).
+- The PR is mergeable (no merge conflicts with the base branch).
+- All CI checks pass (use `gh run list`, not `gh pr checks`).
 - No outstanding bot comments are unresolved (either you resolved a false positive, or you pushed a fix AND the bot's subsequent review approved/resolved it).
 - No outstanding human comments are unaddressed (you replied to mechanicals after pushing, or you flagged architecturals for user discussion).
 
@@ -168,9 +179,9 @@ If you find yourself about to type `gh pr merge`, stop. That's not what this ski
 
 ## What requires judgment
 
-1. **False positive vs. legit (Step 2c).** Bots get this wrong sometimes — both false positives and false-cleans. Read the actual code. If the bot's claim doesn't match what the code does, mark it false positive with a one-line reason. If you're not sure, err toward "legit" — pushing a small refactor is cheaper than having a real bug slip through.
+1. **False positive vs. legit (Step 2d).** Bots get this wrong sometimes — both false positives and false-cleans. Read the actual code. If the bot's claim doesn't match what the code does, mark it false positive with a one-line reason. If you're not sure, err toward "legit" — pushing a small refactor is cheaper than having a real bug slip through.
 
-2. **Mechanical vs. architectural (Step 2d).** A "rename this variable" is mechanical. A "let's consider whether this whole abstraction is right" is architectural. When in doubt, treat it as architectural and flag for the user — the cost of waiting one extra cycle is small; the cost of starting a wrong rewrite is large.
+2. **Mechanical vs. architectural (Step 2e).** A "rename this variable" is mechanical. A "let's consider whether this whole abstraction is right" is architectural. When in doubt, treat it as architectural and flag for the user — the cost of waiting one extra cycle is small; the cost of starting a wrong rewrite is large.
 
 3. **When to stop early.** If the same comment keeps coming back after you've pushed multiple fixes the bot disagrees with, stop and flag the user. You're likely in a loop where you and the bot disagree about what "fixed" means — escalate rather than ping-pong.
 
@@ -182,6 +193,7 @@ If you find yourself about to type `gh pr merge`, stop. That's not what this ski
 
 ## Anti-patterns
 
+- **Silently skipping a step because a command failed.** If `gh pr checks` returns 403, you don't get to skip CI checking. You try `gh run list`, `gh api`, or any other way to get the information. If nothing works, you flag it to the user **on the very first wakeup** — not on the 10th. Every step in Phase 2 is mandatory. A step you silently skipped is a category of problems you're not monitoring.
 - **Self-resolving bot comments after pushing a fix.** You're skipping the verification step that's the whole point of having a reviewer. Push the fix, leave the comment, re-tag the bot, let the next review verify.
 - **Starting an architectural rewrite from a single review comment.** That's a much bigger commitment than this skill is sized for. Flag the user.
 - **Reaching the COUNT cap without converging and silently re-arming.** If you ran 20 cycles and the PR still isn't clean, something's stuck (loop with bot, flaky test, waiting on user). Stop and report — don't add another schedule.
