@@ -68,9 +68,11 @@ func (c *Client) renderLiveView(buf *bytes.Buffer) {
 	if startRow < 0 {
 		startRow = 0
 	}
+	rows := collectVTRows(c.VT.Vt, startRow, c.VT.ChildRows)
+	spans := detectURLSpans(rows, c.VT.Cols)
 	for i := 0; i < c.VT.ChildRows; i++ {
 		fmt.Fprintf(buf, "\033[%d;1H", i+1)
-		c.RenderLineFrom(buf, c.VT.Vt, startRow+i)
+		c.RenderLineFrom(buf, c.VT.Vt, startRow+i, spans[i])
 		buf.WriteString("\033[0m\033[K") // erase trailing stale content with default bg
 	}
 }
@@ -94,11 +96,13 @@ func (c *Client) renderScrollView(buf *bytes.Buffer) {
 	if startRow < 0 {
 		startRow = 0
 	}
+	rows := collectVTRows(sb, startRow, c.VT.ChildRows)
+	spans := detectURLSpans(rows, c.VT.Cols)
 	for i := 0; i < c.VT.ChildRows; i++ {
 		fmt.Fprintf(buf, "\033[%d;1H", i+1)
 		row := startRow + i
 		if row >= 0 && row < len(sb.Content) {
-			c.RenderLineFrom(buf, sb, row)
+			c.RenderLineFrom(buf, sb, row, spans[i])
 		}
 		buf.WriteString("\033[0m\033[K")
 	}
@@ -118,20 +122,54 @@ func (c *Client) renderScrollViewHistory(buf *bytes.Buffer) {
 		startRow = 0
 	}
 
+	// Build per-row rune content for URL detection across the entire visible
+	// window, regardless of whether each row came from history or live VT.
+	// This lets a URL detected on a history row continue into a live row.
+	rows := make([][]rune, c.VT.ChildRows)
+	for i := 0; i < c.VT.ChildRows; i++ {
+		row := startRow + i
+		if row < 0 || row >= totalRows {
+			continue
+		}
+		if row < histLen {
+			rows[i] = c.VT.ScrollHistory[row].Content
+		} else {
+			vtRow := row - histLen
+			if vtRow < len(c.VT.Vt.Content) {
+				rows[i] = c.VT.Vt.Content[vtRow]
+			}
+		}
+	}
+	spans := detectURLSpans(rows, c.VT.Cols)
+
 	for i := 0; i < c.VT.ChildRows; i++ {
 		fmt.Fprintf(buf, "\033[%d;1H", i+1)
 		row := startRow + i
 		if row >= 0 && row < totalRows {
 			if row < histLen {
-				c.renderHistoryEntry(buf, c.VT.ScrollHistory[row])
+				c.renderHistoryEntry(buf, c.VT.ScrollHistory[row], spans[i])
 			} else {
 				vtRow := row - histLen
-				c.RenderLineFrom(buf, c.VT.Vt, vtRow)
+				c.RenderLineFrom(buf, c.VT.Vt, vtRow, spans[i])
 			}
 		}
 		buf.WriteString("\033[0m\033[K")
 	}
 	c.renderScrollIndicator(buf)
+}
+
+// collectVTRows returns count rows of content from a midterm terminal starting
+// at startRow. Out-of-range rows yield nil entries, which detectURLSpans
+// treats as empty.
+func collectVTRows(vt *midterm.Terminal, startRow, count int) [][]rune {
+	rows := make([][]rune, count)
+	for i := 0; i < count; i++ {
+		r := startRow + i
+		if r >= 0 && r < len(vt.Content) {
+			rows[i] = vt.Content[r]
+		}
+	}
+	return rows
 }
 
 // renderHistoryEntry emits one ScrollHistoryEntry to buf, sized to the current
@@ -140,46 +178,53 @@ func (c *Client) renderScrollViewHistory(buf *bytes.Buffer) {
 // erases the tail). This is the width-adaptation that the old "pre-rendered
 // ANSI string" representation couldn't do — resizes no longer produce wrap
 // collisions or stale-width artifacts in scrollback.
-func (c *Client) renderHistoryEntry(buf *bytes.Buffer, entry virtualterminal.ScrollHistoryEntry) {
+func (c *Client) renderHistoryEntry(buf *bytes.Buffer, entry virtualterminal.ScrollHistoryEntry, autoSpans []urlSpan) {
 	cols := c.VT.Cols
 	if cols <= 0 {
 		return
 	}
-	var pos int
-	var lastFormat midterm.Format
-	var lastURL string
-	first := true
+	n := cols
+	if n > len(entry.Content) {
+		n = len(entry.Content)
+	}
+	if n == 0 {
+		buf.WriteString("\033[0m")
+		return
+	}
+
+	formats := make([]midterm.Format, n)
+	urls := make([]string, n)
+	pos := 0
 	for _, run := range entry.Runs {
-		if pos >= cols {
+		if pos >= n {
 			break
 		}
 		end := pos + run.Size
-		if end > cols {
-			end = cols
+		if end > n {
+			end = n
 		}
-		f := run.Format
-		if first || f != lastFormat {
-			buf.WriteString("\033[0m")
-			buf.WriteString(f.Render())
-			lastFormat = f
-			first = false
-		}
-		// Sanitize before tracking so an unsafe URL is treated as no-link in
-		// the state machine — matches RenderLineFrom and avoids a stray
-		// end-of-row close when no open was emitted.
-		curURL := sanitizeOSC8URL(run.URL)
-		if curURL != lastURL {
-			writeOSC8BoundaryStr(buf, lastURL, curURL)
-			lastURL = curURL
-		}
-		contentEnd := end
-		if contentEnd > len(entry.Content) {
-			contentEnd = len(entry.Content)
-		}
-		if pos < contentEnd {
-			buf.WriteString(string(entry.Content[pos:contentEnd]))
+		url := sanitizeOSC8URL(run.URL)
+		for i := pos; i < end; i++ {
+			formats[i] = run.Format
+			urls[i] = url
 		}
 		pos = end
+	}
+	overlayAutoSpans(urls, autoSpans, n)
+
+	var lastFormat midterm.Format
+	var lastURL string
+	for i := 0; i < n; i++ {
+		if formats[i] != lastFormat {
+			buf.WriteString("\033[0m")
+			buf.WriteString(formats[i].Render())
+			lastFormat = formats[i]
+		}
+		if urls[i] != lastURL {
+			writeOSC8BoundaryStr(buf, lastURL, urls[i])
+			lastURL = urls[i]
+		}
+		buf.WriteRune(entry.Content[i])
 	}
 	if lastURL != "" {
 		buf.WriteString("\033]8;;\033\\")
@@ -264,53 +309,60 @@ func (c *Client) renderScrollIndicator(buf *bytes.Buffer) {
 	fmt.Fprintf(buf, "\033[1;%dH\033[7m%s\033[0m", col, indicator)
 }
 
-// RenderLineFrom writes one row of the given terminal to buf.
-// This uses explicit SGR resets between format regions to prevent
-// background colors from bleeding across regions (midterm's RenderLine
-// does not reset between regions). OSC 8 hyperlinks are emitted around
-// runs of cells sharing a URL ID — opened on entry, closed on exit, so
-// each row stands alone (the next row will reopen if its first run is
-// still linked).
-func (c *Client) RenderLineFrom(buf *bytes.Buffer, vt *midterm.Terminal, row int) {
+// RenderLineFrom writes one row of the given terminal to buf, overlaying any
+// auto-detected URL spans on cells that don't already carry an explicit OSC 8
+// link from the inner program. Cells with an explicit URL win — a "click
+// here" → URL link shouldn't get its URL replaced by an auto-detection of
+// some other URL on the same row.
+//
+// Uses explicit SGR resets between format regions (midterm's RenderLine does
+// not reset between regions, which lets background colors bleed). OSC 8 is
+// opened on entry to a URL run and closed on exit; each row stands alone, so
+// a multi-row link reopens at the start of the next row.
+func (c *Client) RenderLineFrom(buf *bytes.Buffer, vt *midterm.Terminal, row int, autoSpans []urlSpan) {
 	if row >= len(vt.Content) {
 		return
 	}
 	line := vt.Content[row]
-	var pos int
-	var lastFormat midterm.Format
-	var lastURL string
-	var lastURLID uint32
+	cols := len(line)
+	if cols == 0 {
+		buf.WriteString("\033[0m")
+		return
+	}
+
+	formats := make([]midterm.Format, cols)
+	urls := make([]string, cols)
+	pos := 0
 	for region := range vt.Format.Regions(row) {
-		f := region.F
-		if f != lastFormat {
-			buf.WriteString("\033[0m")
-			buf.WriteString(f.Render())
-			lastFormat = f
-		}
-		// Resolve+sanitize URLs once per ID; cache via lastURLID so multiple
-		// adjacent regions with the same ID skip the lookup.
-		var curURL string
-		if region.URLID != 0 {
-			if region.URLID == lastURLID {
-				curURL = lastURL
-			} else {
-				curURL = sanitizeOSC8URL(vt.URL(region.URLID))
-			}
-		}
-		if curURL != lastURL {
-			writeOSC8BoundaryStr(buf, lastURL, curURL)
-			lastURL = curURL
-		}
-		lastURLID = region.URLID
 		end := pos + region.Size
-		if pos < len(line) {
-			contentEnd := end
-			if contentEnd > len(line) {
-				contentEnd = len(line)
-			}
-			buf.WriteString(string(line[pos:contentEnd]))
+		if end > cols {
+			end = cols
+		}
+		var url string
+		if region.URLID != 0 {
+			url = sanitizeOSC8URL(vt.URL(region.URLID))
+		}
+		for i := pos; i < end; i++ {
+			formats[i] = region.F
+			urls[i] = url
 		}
 		pos = end
+	}
+	overlayAutoSpans(urls, autoSpans, cols)
+
+	var lastFormat midterm.Format
+	var lastURL string
+	for i := 0; i < cols; i++ {
+		if formats[i] != lastFormat {
+			buf.WriteString("\033[0m")
+			buf.WriteString(formats[i].Render())
+			lastFormat = formats[i]
+		}
+		if urls[i] != lastURL {
+			writeOSC8BoundaryStr(buf, lastURL, urls[i])
+			lastURL = urls[i]
+		}
+		buf.WriteRune(line[i])
 	}
 	if lastURL != "" {
 		buf.WriteString("\033]8;;\033\\")
@@ -318,9 +370,35 @@ func (c *Client) RenderLineFrom(buf *bytes.Buffer, vt *midterm.Terminal, row int
 	buf.WriteString("\033[0m")
 }
 
-// RenderLine writes one row of the primary virtual terminal to buf.
+// overlayAutoSpans writes auto-detected URL strings into the per-cell urls
+// slice, but only for cells that don't already carry an explicit URL from the
+// inner program. The producer's OSC 8 always wins.
+func overlayAutoSpans(urls []string, spans []urlSpan, cols int) {
+	for _, span := range spans {
+		s, e := span.startCol, span.endCol
+		if s < 0 {
+			s = 0
+		}
+		if e > cols {
+			e = cols
+		}
+		url := sanitizeOSC8URL(span.url)
+		if url == "" {
+			continue
+		}
+		for i := s; i < e; i++ {
+			if urls[i] == "" {
+				urls[i] = url
+			}
+		}
+	}
+}
+
+// RenderLine writes one row of the primary virtual terminal to buf without
+// auto-detected URL spans. Callers that need URL detection should call
+// detectURLSpans for the window and use RenderLineFrom directly.
 func (c *Client) RenderLine(buf *bytes.Buffer, row int) {
-	c.RenderLineFrom(buf, c.VT.Vt, row)
+	c.RenderLineFrom(buf, c.VT.Vt, row, nil)
 }
 
 // RenderStatusBar draws the separator line with mode, status, and help text.

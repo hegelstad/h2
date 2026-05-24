@@ -23,7 +23,7 @@ func TestRenderLineFrom_EmitsOSC8AroundHyperlink(t *testing.T) {
 	fmt.Fprintf(c.VT.Vt, "%shello%s world", osc8("https://example.com"), osc8(""))
 
 	var buf bytes.Buffer
-	c.RenderLineFrom(&buf, c.VT.Vt, 0)
+	c.RenderLineFrom(&buf, c.VT.Vt, 0, nil)
 	got := buf.String()
 
 	openSeq := osc8("https://example.com")
@@ -51,7 +51,7 @@ func TestRenderLineFrom_NoOSC8ForUnlinkedRow(t *testing.T) {
 	fmt.Fprint(c.VT.Vt, "just text")
 
 	var buf bytes.Buffer
-	c.RenderLineFrom(&buf, c.VT.Vt, 0)
+	c.RenderLineFrom(&buf, c.VT.Vt, 0, nil)
 	got := buf.String()
 
 	if strings.Contains(got, "\x1b]8;") {
@@ -68,7 +68,7 @@ func TestRenderLineFrom_ClosesBetweenAdjacentLinks(t *testing.T) {
 		osc8("https://y"), osc8(""))
 
 	var buf bytes.Buffer
-	c.RenderLineFrom(&buf, c.VT.Vt, 0)
+	c.RenderLineFrom(&buf, c.VT.Vt, 0, nil)
 	got := buf.String()
 
 	openX := osc8("https://x")
@@ -95,7 +95,7 @@ func TestRenderHistoryEntry_EmitsOSC8(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	c.renderHistoryEntry(&buf, entry)
+	c.renderHistoryEntry(&buf, entry, nil)
 	got := buf.String()
 
 	openSeq := osc8("https://example.com")
@@ -131,7 +131,7 @@ func TestRenderHistoryEntry_RejectsMaliciousURI(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	c.renderHistoryEntry(&buf, entry)
+	c.renderHistoryEntry(&buf, entry, nil)
 	got := buf.String()
 	if strings.Contains(got, bad) || strings.Contains(got, "injected") {
 		t.Fatalf("malicious URI leaked through history render: %q", got)
@@ -174,9 +174,68 @@ func TestRenderHistoryEntry_NoOSC8WhenAllRunsUnlinked(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	c.renderHistoryEntry(&buf, entry)
+	c.renderHistoryEntry(&buf, entry, nil)
 	got := buf.String()
 	if strings.Contains(got, "\x1b]8;") {
 		t.Fatalf("unexpected OSC 8 in unlinked entry: %q", got)
+	}
+}
+
+func TestRenderLineFrom_AutoDetectedURLBecomesOSC8(t *testing.T) {
+	c := newTestClient(2, 30)
+	fmt.Fprint(c.VT.Vt, "see https://example.com here")
+
+	spans := detectURLSpans(collectVTRows(c.VT.Vt, 0, 1), c.VT.Cols)
+	var buf bytes.Buffer
+	c.RenderLineFrom(&buf, c.VT.Vt, 0, spans[0])
+	got := buf.String()
+
+	if !strings.Contains(got, osc8("https://example.com")) {
+		t.Fatalf("auto-detected URL should produce OSC 8 open: %q", got)
+	}
+	if !strings.Contains(got, osc8Close) {
+		t.Fatalf("missing OSC 8 close: %q", got)
+	}
+}
+
+func TestRenderLineFrom_ExplicitOSC8WinsOverAutoDetect(t *testing.T) {
+	// Inner program emits an OSC 8 link with anchor text containing a
+	// different visible URL. The explicit URL must win.
+	c := newTestClient(2, 60)
+	fmt.Fprintf(c.VT.Vt, "%shttps://decoy.com%s",
+		osc8("https://real.example.com"), osc8(""))
+
+	spans := detectURLSpans(collectVTRows(c.VT.Vt, 0, 1), c.VT.Cols)
+	var buf bytes.Buffer
+	c.RenderLineFrom(&buf, c.VT.Vt, 0, spans[0])
+	got := buf.String()
+
+	if !strings.Contains(got, osc8("https://real.example.com")) {
+		t.Fatalf("explicit URL should be emitted: %q", got)
+	}
+	if strings.Contains(got, osc8("https://decoy.com")) {
+		t.Fatalf("auto-detected URL must not override explicit OSC 8: %q", got)
+	}
+}
+
+func TestDetectURLSpans_WrapEmissionBothHalves(t *testing.T) {
+	// End-to-end check that both halves of a wrapped URL emit the FULL URL
+	// when fed through writeOSC8BoundaryStr — what would actually reach the
+	// outer terminal.
+	cols := 30
+	full := "https://example.com/path/that-is-long-enough-to-wrap"
+	first := full[:cols]
+	second := full[cols:]
+	rows := [][]rune{[]rune(first), []rune(second + " tail")}
+	spans := detectURLSpans(rows, cols)
+	for i, rowSpans := range spans {
+		if len(rowSpans) != 1 || rowSpans[0].url != full {
+			t.Fatalf("row %d: want 1 span with full URL, got %+v", i, rowSpans)
+		}
+		var buf bytes.Buffer
+		writeOSC8BoundaryStr(&buf, "", rowSpans[0].url)
+		if !strings.Contains(buf.String(), osc8(full)) {
+			t.Fatalf("row %d emission missing full-URL open: %q", i, buf.String())
+		}
 	}
 }
