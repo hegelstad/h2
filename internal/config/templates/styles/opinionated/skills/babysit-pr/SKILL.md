@@ -110,7 +110,9 @@ For each bot comment that isn't already resolved/handled:
 
 1. **Read it carefully.** Look at the file/line, understand what the bot is claiming.
 2. **Decide: false positive or legit?**
-   - **False positive** (bot misunderstood, claim doesn't apply, code is actually correct as-is): mark the comment resolved with a brief reason. Use `gh api` to mark the conversation resolved. **This is the only time you resolve a comment yourself.**
+   - **False positive** (bot misunderstood, claim doesn't apply, code is actually correct as-is): reply to the comment, then resolve the review thread. **This is the only time you resolve a thread yourself.** Do not minimize the comment — minimizing hides it, which is not the same as resolving.
+
+     Fine-grained PATs with `pull_requests:write` do not have permission to resolve threads via `resolveReviewThread`. If you get a 403, leave a reply on the comment instead. The reply must start with `Ok to resolve` on the first line, then a line break, then a short explanation of why the issue is already addressed or is a false positive. The user will resolve the thread from the GitHub UI.
    - **Legit** (bot is right, code should change): write the fix, push it. **DO NOT resolve the comment yourself.** Leave it open. The next review pass — when you re-tag the bot — is what verifies your fix actually addressed the concern. If you resolve it yourself, you're declaring "fixed" without verification.
 
 3. **Why this matters:** resolving a comment yourself short-circuits the verification loop. The whole point of the bot review is that it independently checks your work. Push fix → request re-review → bot reads new code → bot resolves OR flags new issues. That second pass is the safety check.
@@ -147,9 +149,10 @@ Output a one-paragraph summary of what you did this tick (CI status, comments ad
 
 The PR is "clean" when:
 
+- `mergeStateStatus` is NOT `BLOCKED`. Check with `gh pr view <pr> --json mergeStateStatus`. If it's `BLOCKED`, the PR is not done — branch protection requirements (required reviews, required checks, unresolved conversations) are not yet met. Keep the schedule alive and keep polling. The user may need to resolve conversations or approve the PR from the GitHub UI.
 - The PR is mergeable (no merge conflicts with the base branch).
 - All CI checks pass (use `gh run list`, not `gh pr checks`).
-- No outstanding bot comments are unresolved (either you resolved a false positive, or you pushed a fix AND the bot's subsequent review approved/resolved it).
+- No outstanding bot comments are unresolved (either you resolved a false positive, or you pushed a fix AND the bot re-reviewed and found no new issues).
 - No outstanding human comments are unaddressed (you replied to mechanicals after pushing, or you flagged architecturals for user discussion).
 
 When you confirm all of the above:
