@@ -908,6 +908,23 @@ func (c *Client) HandleSGRMouse(params []byte, press bool) {
 		return
 	}
 
+	// Motion-only event (no button), used for hover-link affordance.
+	// SGR encodes motion in bit 5 (mask 32); the low bits then carry button
+	// state (3 = released/no button). We treat any motion event as hover.
+	if button&32 != 0 {
+		c.handleHover(parts[1], parts[2])
+		return
+	}
+
+	// Click on a cell carrying a URL → open it. Wheel events have bit 6 set,
+	// so we exclude those. Any modifier combo is fine: clicks are otherwise
+	// inert in h2 today.
+	if press && button&64 == 0 {
+		if c.tryOpenLinkAt(parts[1], parts[2]) {
+			return
+		}
+	}
+
 	switch button {
 	case 0: // left click
 		if press {

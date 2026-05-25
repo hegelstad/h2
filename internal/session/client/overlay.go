@@ -100,6 +100,12 @@ type Client struct {
 	// Keybinding mode (kitty vs legacy).
 	KeybindingMode KeybindingMode
 	KittyKeyboard  bool // true if kitty keyboard protocol is active
+
+	// HoveredURL is the URL of the cell the mouse is currently over (or "").
+	// Set by motion mouse events (?1003h); read by the renderer to apply
+	// an underline overlay on cells whose URL matches, giving the user a
+	// visual affordance that the cell is clickable.
+	HoveredURL string
 }
 
 // InitClient initializes per-client state. Called by Session after creating
@@ -246,13 +252,13 @@ func (c *Client) SetupInteractiveTerminal() (cleanup func(), stopStatus chan str
 	c.detectKittyKeyboard()
 
 	// Enable SGR mouse reporting for scroll wheel support.
-	os.Stdout.Write([]byte("\033[?1000h\033[?1006h"))
+	os.Stdout.Write([]byte("\033[?1000h\033[?1003h\033[?1006h"))
 
 	cleanup = func() {
 		if c.KittyKeyboard {
 			os.Stdout.Write([]byte("\033[<u")) // pop kitty keyboard mode
 		}
-		os.Stdout.Write([]byte("\033[?1000l\033[?1006l"))
+		os.Stdout.Write([]byte("\033[?1000l\033[?1003l\033[?1006l"))
 		term.Restore(fd, c.VT.Restore)
 		os.Stdout.Write([]byte("\033[?25h\033[0m\r\n"))
 	}

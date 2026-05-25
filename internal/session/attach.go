@@ -85,7 +85,10 @@ func (d *Daemon) handleAttach(conn net.Conn, req *message.Request) {
 		// Enable mouse reporting and render the current screen.
 		// RenderScreen clears each line individually (\033[2K), so a full
 		// screen clear (\033[2J) is unnecessary and would cause a visible flash.
-		cl.Output.Write([]byte("\033[?1000h\033[?1006h"))
+		// 1003h adds any-event motion reporting so we can underline-on-hover
+		// for OSC 8 links. The event rate is higher (every mouse move) but
+		// h2 only re-renders when the hovered URL actually changes.
+		cl.Output.Write([]byte("\033[?1000h\033[?1003h\033[?1006h"))
 		cl.RenderScreen()
 		cl.RenderBar()
 	}()
@@ -99,7 +102,7 @@ func (d *Daemon) handleAttach(conn net.Conn, req *message.Request) {
 		vt.Mu.Lock()
 		defer vt.Mu.Unlock()
 		cl.OnDetach = nil
-		cl.Output.Write([]byte("\033[?1000l\033[?1006l"))
+		cl.Output.Write([]byte("\033[?1000l\033[?1003l\033[?1006l"))
 
 		// Release passthrough ownership if this client held it.
 		if s.PassthroughOwner == cl {

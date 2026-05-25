@@ -93,7 +93,7 @@ func doAttach(name string) error {
 		return fmt.Errorf("set raw mode: %w", err)
 	}
 	defer func() {
-		os.Stdout.WriteString("\033[?1000l\033[?1006l") // Disable mouse mode
+		os.Stdout.WriteString("\033[?1000l\033[?1003l\033[?1006l") // Disable mouse modes
 		term.Restore(fd, oldState)
 		os.Stdout.WriteString("\033[?25h\033[0m\r\n")
 	}()

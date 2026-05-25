@@ -214,11 +214,16 @@ func (c *Client) renderHistoryEntry(buf *bytes.Buffer, entry virtualterminal.Scr
 
 	var lastFormat midterm.Format
 	var lastURL string
+	hover := c.HoveredURL
 	for i := 0; i < n; i++ {
-		if formats[i] != lastFormat {
+		f := formats[i]
+		if hover != "" && urls[i] == hover {
+			f.SetUnderline(true)
+		}
+		if f != lastFormat {
 			buf.WriteString("\033[0m")
-			buf.WriteString(formats[i].Render())
-			lastFormat = formats[i]
+			buf.WriteString(f.Render())
+			lastFormat = f
 		}
 		if urls[i] != lastURL {
 			writeOSC8BoundaryStr(buf, lastURL, urls[i])
@@ -352,11 +357,16 @@ func (c *Client) RenderLineFrom(buf *bytes.Buffer, vt *midterm.Terminal, row int
 
 	var lastFormat midterm.Format
 	var lastURL string
+	hover := c.HoveredURL
 	for i := 0; i < cols; i++ {
-		if formats[i] != lastFormat {
+		f := formats[i]
+		if hover != "" && urls[i] == hover {
+			f.SetUnderline(true)
+		}
+		if f != lastFormat {
 			buf.WriteString("\033[0m")
-			buf.WriteString(formats[i].Render())
-			lastFormat = formats[i]
+			buf.WriteString(f.Render())
+			lastFormat = f
 		}
 		if urls[i] != lastURL {
 			writeOSC8BoundaryStr(buf, lastURL, urls[i])
