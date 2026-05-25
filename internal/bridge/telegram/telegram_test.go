@@ -80,6 +80,38 @@ func TestSendFormatted(t *testing.T) {
 	}
 }
 
+func TestSendFormatted_MarkdownV2(t *testing.T) {
+	var gotText, gotParseMode string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		gotText = r.FormValue("text")
+		gotParseMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(apiResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+	}
+
+	// MarkdownV2 reserves many characters; the bridge must forward the body
+	// verbatim, leaving escaping responsibility to the caller.
+	body := "*bold* _italic_ \\(parens\\) \\.dot"
+	err := tg.SendFormatted(context.Background(), body, "MarkdownV2")
+	if err != nil {
+		t.Fatalf("SendFormatted: %v", err)
+	}
+	if gotText != body {
+		t.Errorf("text = %q, want %q", gotText, body)
+	}
+	if gotParseMode != "MarkdownV2" {
+		t.Errorf("parse_mode = %q, want %q", gotParseMode, "MarkdownV2")
+	}
+}
+
 func TestSend_NoParseMode(t *testing.T) {
 	var gotParseMode string
 
