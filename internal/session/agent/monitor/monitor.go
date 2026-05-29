@@ -142,6 +142,15 @@ func (m *AgentMonitor) processEvent(ev AgentEvent) {
 		m.lastActivityAt = time.Now()
 	}
 
+	// Backstop: if we're in Exited but a non-terminal event arrives, the
+	// harness is still alive — drop back to Initialized so the event below
+	// can drive state normally. Claude's SessionEnd hook fires on /clear
+	// and session rotation while the process keeps running; without this
+	// we'd stay falsely Exited forever and idle message delivery would stall.
+	if m.state == StateExited && ev.Type != EventSessionEnded {
+		m.setStateLocked(StateInitialized, SubStateNone)
+	}
+
 	switch ev.Type {
 	case EventSessionStarted:
 		if data, ok := ev.Data.(SessionStartedData); ok {
@@ -203,10 +212,7 @@ func (m *AgentMonitor) processEvent(ev AgentEvent) {
 
 	case EventStateChange:
 		if data, ok := ev.Data.(StateChangeData); ok {
-			// Exited is sticky — don't allow state changes once exited.
-			if m.state != StateExited {
-				m.setStateLocked(data.State, data.SubState)
-			}
+			m.setStateLocked(data.State, data.SubState)
 			if data.SubState == SubStateBlockedOnPermission {
 				m.blockedOnPermission = true
 			} else if data.SubState != SubStateBlockedOnPermission {
