@@ -98,12 +98,15 @@ func RunDaemon(sessionDir string, rc *config.RuntimeConfig, resume bool) error {
 	})
 
 	// Wire OnUsageLimit callback to persist rate limit info to the profile's
-	// ratelimit.json so other tools (e.g. rotate) can check it.
+	// ratelimit.json so other tools (e.g. rotate) can check it, and notify the
+	// user over any configured bridge (e.g. Telegram) the first time a given
+	// limit is hit.
 	s.monitor.SetOnUsageLimit(func(data monitor.UsageLimitData) {
 		profileDir := rc.HarnessConfigDir()
 		if profileDir == "" {
 			return
 		}
+		prev, _ := config.ReadRateLimit(profileDir)
 		info := &config.RateLimitInfo{
 			ResetsAt:   data.ResetsAt,
 			Message:    data.Message,
@@ -112,6 +115,13 @@ func RunDaemon(sessionDir string, rc *config.RuntimeConfig, resume bool) error {
 		}
 		if err := config.WriteRateLimit(profileDir, info); err != nil {
 			log.Printf("warning: write rate limit info: %v", err)
+		}
+		// Best-effort, one notification per distinct limit. Runs in a
+		// goroutine so bridge I/O never blocks the monitor. Bridges are
+		// separate processes, so this reaches the user even though this
+		// agent is itself rate limited.
+		if isNewRateLimit(prev, data.ResetsAt) {
+			go notifyBridges("", buildRateLimitNotice(rc.AgentName, rc.Profile, data.ResetsAt))
 		}
 	})
 
