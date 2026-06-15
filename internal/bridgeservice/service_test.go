@@ -77,6 +77,36 @@ func (m *mockFormattedBridge) FormattedCalls() []formattedCall {
 	return append([]formattedCall(nil), m.formattedCalls...)
 }
 
+// mockRichBridge implements Bridge, Sender, and RichSender (but not
+// FormattedSender) so tests can assert rich-format routing in isolation.
+type mockRichBridge struct {
+	name      string
+	richCalls []richCall
+	mu        sync.Mutex
+}
+
+type richCall struct {
+	Text   string
+	Markup string
+}
+
+func (m *mockRichBridge) Name() string { return m.name }
+func (m *mockRichBridge) Close() error { return nil }
+func (m *mockRichBridge) Send(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockRichBridge) SendRich(_ context.Context, text, markup string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.richCalls = append(m.richCalls, richCall{Text: text, Markup: markup})
+	return nil
+}
+func (m *mockRichBridge) RichCalls() []richCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]richCall(nil), m.richCalls...)
+}
+
 // mockTypingBridge implements Bridge, Sender, and TypingIndicator.
 type mockTypingBridge struct {
 	name        string
@@ -518,6 +548,57 @@ func TestSendOutbound_FormatOnSenderOnlyBridge_Errors(t *testing.T) {
 	}
 	if msgs := sender.Messages(); len(msgs) != 0 {
 		t.Errorf("expected no plain Send calls, got %v", msgs)
+	}
+}
+
+func TestSendOutbound_RichFormatRoutedToSendRich(t *testing.T) {
+	rb := &mockRichBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{rb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	if err := svc.sendOutbound("concierge", "# Heading\n\n| a | b |", "rich"); err != nil {
+		t.Fatalf("sendOutbound: %v", err)
+	}
+
+	calls := rb.RichCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 SendRich call, got %d", len(calls))
+	}
+	if calls[0].Text != "# Heading\n\n| a | b |" {
+		t.Errorf("text = %q", calls[0].Text)
+	}
+	if calls[0].Markup != "markdown" {
+		t.Errorf("markup = %q, want markdown", calls[0].Markup)
+	}
+}
+
+func TestSendOutbound_RichHTMLFormatUsesHTMLMarkup(t *testing.T) {
+	rb := &mockRichBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{rb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	if err := svc.sendOutbound("concierge", "<h1>Hi</h1>", "rich-html"); err != nil {
+		t.Fatalf("sendOutbound: %v", err)
+	}
+
+	calls := rb.RichCalls()
+	if len(calls) != 1 || calls[0].Markup != "html" {
+		t.Fatalf("expected 1 SendRich call with html markup, got %+v", calls)
+	}
+}
+
+func TestSendOutbound_RichOnFormattedOnlyBridge_Errors(t *testing.T) {
+	// mockFormattedBridge implements FormattedSender but not RichSender.
+	fb := &mockFormattedBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{fb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	err := svc.sendOutbound("concierge", "# hi", "rich")
+	if err == nil {
+		t.Fatalf("expected error when rich format used on bridge without RichSender")
+	}
+	if !strings.Contains(err.Error(), "does not support rich messages") {
+		t.Errorf("error = %v, want substring \"does not support rich messages\"", err)
+	}
+	if calls := fb.FormattedCalls(); len(calls) != 0 {
+		t.Errorf("expected no SendFormatted calls, got %v", calls)
 	}
 }
 

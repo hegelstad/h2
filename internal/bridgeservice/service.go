@@ -327,6 +327,21 @@ func (s *Service) sendOutbound(from, body, format string) error {
 			continue
 		}
 		if format != "" {
+			// Rich formats route to RichSender (e.g. Telegram sendRichMessage);
+			// the others are parse-mode hints for FormattedSender. Either way a
+			// bridge lacking the capability is a hard error (no silent fallback).
+			if markup, isRich := bridge.IsRichFormat(format); isRich {
+				rs, rok := b.(bridge.RichSender)
+				if !rok {
+					errs = append(errs, fmt.Sprintf("%s: does not support rich messages", b.Name()))
+					continue
+				}
+				if err := rs.SendRich(ctx, tagged, markup); err != nil {
+					log.Printf("bridge: send rich via %s: %v", b.Name(), err)
+					errs = append(errs, fmt.Sprintf("%s: %v", b.Name(), err))
+				}
+				continue
+			}
 			fs, fok := b.(bridge.FormattedSender)
 			if !fok {
 				errs = append(errs, fmt.Sprintf("%s: does not support --format", b.Name()))

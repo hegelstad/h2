@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -25,13 +26,16 @@ const (
 
 	// maxMessageLen is Telegram's maximum message length.
 	maxMessageLen = 4096
+	// maxRichMessageLen is the Bot API 10.1 rich-message text limit (UTF-8
+	// characters), far higher than a plain sendMessage's 4096.
+	maxRichMessageLen = 32768
 	// maxPages is the maximum number of messages to send for a single response.
 	maxPages = 3
 )
 
 // Telegram implements bridge.Bridge, bridge.Sender, bridge.FormattedSender,
-// and bridge.Receiver using the Telegram Bot API. Standard library only — no
-// external Telegram SDK.
+// bridge.RichSender, and bridge.Receiver using the Telegram Bot API. Standard
+// library only — no external Telegram SDK.
 type Telegram struct {
 	Token           string
 	ChatID          int64
@@ -74,6 +78,59 @@ func (t *Telegram) Send(ctx context.Context, text string) error {
 // configured chat, setting Telegram's parse_mode parameter.
 func (t *Telegram) SendFormatted(ctx context.Context, text, format string) error {
 	return t.sendWithFormat(ctx, text, format)
+}
+
+// SendRich posts a Bot API 10.1 "rich message" (sendRichMessage) to the
+// configured chat. markup selects the body encoding: "markdown" (default) or
+// "html". Rich messages support headings, lists, tables, block quotations,
+// collapsible blocks, formulas, and inline media — well beyond sendMessage's
+// parse_mode set. Bodies longer than the 32768-character rich limit are split
+// at line boundaries, up to maxPages messages; splitting may break a structure
+// (e.g. a table) that straddles the boundary, but typical messages fit in one.
+func (t *Telegram) SendRich(ctx context.Context, text, markup string) error {
+	chunks := bridge.SplitMessage(text, maxRichMessageLen, maxPages)
+	for _, chunk := range chunks {
+		if err := t.sendRichChunk(ctx, chunk, markup); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Telegram) sendRichChunk(ctx context.Context, text, markup string) error {
+	richMessage := map[string]string{}
+	if markup == "html" {
+		richMessage["html"] = text
+	} else {
+		richMessage["markdown"] = text
+	}
+	payload := map[string]any{
+		"chat_id":      t.ChatID,
+		"rich_message": richMessage,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("telegram send rich: marshal: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendRichMessage"), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram send rich: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram send rich: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("telegram send rich: decode response: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram send rich: API error: %s", result.Description)
+	}
+	return nil
 }
 
 func (t *Telegram) sendWithFormat(ctx context.Context, text, format string) error {

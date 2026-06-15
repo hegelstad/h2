@@ -44,6 +44,81 @@ func TestSend(t *testing.T) {
 	}
 }
 
+func TestSendRich_Markdown(t *testing.T) {
+	var gotPath, gotContentType string
+	var gotBody map[string]any
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotContentType = r.Header.Get("Content-Type")
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(apiResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+
+	body := "# Heading\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |"
+	if err := tg.SendRich(context.Background(), body, "markdown"); err != nil {
+		t.Fatalf("SendRich: %v", err)
+	}
+
+	if gotPath != "/botTOKEN/sendRichMessage" {
+		t.Errorf("path = %q, want /botTOKEN/sendRichMessage", gotPath)
+	}
+	if gotContentType != "application/json" {
+		t.Errorf("content-type = %q, want application/json", gotContentType)
+	}
+	// chat_id arrives as a JSON number.
+	if cid, _ := gotBody["chat_id"].(float64); cid != 42 {
+		t.Errorf("chat_id = %v, want 42", gotBody["chat_id"])
+	}
+	rm, ok := gotBody["rich_message"].(map[string]any)
+	if !ok {
+		t.Fatalf("rich_message missing or wrong type: %v", gotBody["rich_message"])
+	}
+	if rm["markdown"] != body {
+		t.Errorf("rich_message.markdown = %q, want %q", rm["markdown"], body)
+	}
+	if _, hasHTML := rm["html"]; hasHTML {
+		t.Errorf("rich_message should not carry html field in markdown mode: %v", rm)
+	}
+}
+
+func TestSendRich_HTML(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		json.NewEncoder(w).Encode(apiResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 7, BaseURL: srv.URL}
+	if err := tg.SendRich(context.Background(), "<h1>Hi</h1>", "html"); err != nil {
+		t.Fatalf("SendRich: %v", err)
+	}
+	rm, _ := gotBody["rich_message"].(map[string]any)
+	if rm["html"] != "<h1>Hi</h1>" {
+		t.Errorf("rich_message.html = %q, want %q", rm["html"], "<h1>Hi</h1>")
+	}
+	if _, hasMD := rm["markdown"]; hasMD {
+		t.Errorf("rich_message should not carry markdown field in html mode: %v", rm)
+	}
+}
+
+func TestSendRich_APIError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(apiResponse{OK: false, Description: "rich message too long"})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	err := tg.SendRich(context.Background(), "x", "markdown")
+	if err == nil || !strings.Contains(err.Error(), "rich message too long") {
+		t.Fatalf("expected API error surfaced, got %v", err)
+	}
+}
+
 func TestSendFormatted(t *testing.T) {
 	var gotChatID, gotText, gotParseMode string
 
