@@ -26,6 +26,13 @@
   as a message containing the caption plus the saved local file path, so the
   agent can open it with its Read tool. The largest photo size is selected;
   reply-to agent tags are preserved for routing.
+- **Rate-limit bridge notifications**: When an agent hits a Claude/Codex usage
+  limit, h2 now sends a one-time alert over every running bridge (e.g.
+  Telegram) with the agent name, profile, reset time, and a `h2 rotate` hint.
+  The notification is best-effort, fires once per distinct limit (deduped via
+  the profile's `ratelimit.json`), runs off the monitor goroutine, and reaches
+  the user even though the limited agent itself cannot make model calls (the
+  bridge is a separate process). Costs no model tokens.
 
 ## v0.3.2
 
