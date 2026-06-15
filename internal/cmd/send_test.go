@@ -174,6 +174,11 @@ func TestValidateFormat(t *testing.T) {
 		{"html", true},     // case-sensitive: Telegram only accepts the capitalized values
 		{"Markdown", true}, // legacy Telegram "Markdown" mode unsupported here
 		{"markdown_v2", true},
+		{"rich", false},          // rich message (markdown body)
+		{"rich-markdown", false}, // explicit markdown alias
+		{"rich-html", false},     // rich message (html body)
+		{"rich-xml", true},       // not a recognized rich format
+		{"Rich", true},           // case-sensitive
 	}
 	for _, tt := range tests {
 		err := validateFormat(tt.in)

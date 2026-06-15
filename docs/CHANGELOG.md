@@ -12,6 +12,15 @@
   (no silent fallback). The agent-tag prefix (`[from-agent] `) is kept as
   plain text outside the formatted body. Callers are responsible for
   escaping HTML or MarkdownV2 reserved characters inside the body.
+- **Structured rich messages (Telegram Bot API 10.1)**: Added `--format rich`
+  (Markdown body) and `--format rich-html` (HTML body) to `h2 send`. When the
+  target is a bridge that implements the new `RichSender` capability interface
+  (currently Telegram, via `sendRichMessage`), the body is delivered as a
+  structured rich message supporting headings, lists, tables, block
+  quotations, collapsible blocks, and formulas — beyond what parse_mode
+  allows. Rich bodies may be up to 32768 characters. Bridges that do not
+  implement `RichSender` reject the flag with a clear error (no silent
+  fallback).
 
 ## v0.3.2
 
