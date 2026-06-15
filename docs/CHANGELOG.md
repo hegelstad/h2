@@ -21,6 +21,11 @@
   allows. Rich bodies may be up to 32768 characters. Bridges that do not
   implement `RichSender` reject the flag with a clear error (no silent
   fallback).
+- **Inbound Telegram media**: Photos and documents sent to the Telegram bridge
+  are downloaded to `$H2_DIR/media/telegram/` and handed to the receiving agent
+  as a message containing the caption plus the saved local file path, so the
+  agent can open it with its Read tool. The largest photo size is selected;
+  reply-to agent tags are preserved for routing.
 
 ## v0.3.2
 

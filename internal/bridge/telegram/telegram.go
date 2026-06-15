@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -236,6 +240,17 @@ func (t *Telegram) poll(ctx context.Context, handler bridge.InboundHandler) {
 				go t.execAndReply(ctx, cmd, args)
 				continue
 			}
+			// Photo/document attachments: download and hand the agent a
+			// local file path it can read, plus any caption.
+			if len(u.Message.Photo) > 0 || u.Message.Document != nil {
+				body := t.handleMedia(ctx, u.Message)
+				agent := ""
+				if u.Message.ReplyToMessage != nil {
+					agent = bridge.ParseAgentTag(u.Message.ReplyToMessage.Text)
+				}
+				handler(agent, body)
+				continue
+			}
 			agent, body := bridge.ParseAgentPrefix(u.Message.Text)
 			// If no explicit prefix, check reply-to message for agent tag.
 			if agent == "" && u.Message.ReplyToMessage != nil {
@@ -281,6 +296,103 @@ func (t *Telegram) getUpdates(ctx context.Context) ([]update, error) {
 	return result.Result, nil
 }
 
+// handleMedia downloads a photo or document attachment and returns a body
+// string containing the caption (if any) plus the saved local file path so the
+// receiving agent can read the file with its Read tool.
+func (t *Telegram) handleMedia(ctx context.Context, m *message) string {
+	var fileID, hintName string
+	switch {
+	case len(m.Photo) > 0:
+		fileID = m.Photo[len(m.Photo)-1].FileID // last entry is the largest size
+		hintName = "photo.jpg"
+	case m.Document != nil:
+		fileID = m.Document.FileID
+		hintName = m.Document.FileName
+	}
+	caption := strings.TrimSpace(m.Caption)
+	path, err := t.downloadFile(ctx, fileID, hintName)
+	if err != nil {
+		log.Printf("bridge: telegram: media download failed: %v", err)
+		note := "[Bilde/fil mottatt via Telegram, men nedlasting feilet.]"
+		if caption != "" {
+			return caption + "\n" + note
+		}
+		return note
+	}
+	log.Printf("bridge: telegram: saved inbound media to %s", path)
+	note := fmt.Sprintf("[Bilde/fil mottatt via Telegram. Lagret på serveren: %s — bruk Read-verktøyet på denne stien for å se innholdet.]", path)
+	if caption != "" {
+		return caption + "\n" + note
+	}
+	return note
+}
+
+// downloadFile resolves a Telegram file_id via getFile and downloads the bytes
+// to $H2_DIR/media/telegram, returning the saved path.
+func (t *Telegram) downloadFile(ctx context.Context, fileID, hintName string) (string, error) {
+	if fileID == "" {
+		return "", fmt.Errorf("empty file_id")
+	}
+	gfURL := t.apiURL("getFile") + "?file_id=" + url.QueryEscape(fileID)
+	req, err := http.NewRequestWithContext(ctx, "GET", gfURL, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := t.client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var gf getFileResponse
+	if err := json.NewDecoder(resp.Body).Decode(&gf); err != nil {
+		return "", err
+	}
+	if !gf.OK || gf.Result.FilePath == "" {
+		return "", fmt.Errorf("getFile: %s", gf.Description)
+	}
+
+	base := t.BaseURL
+	if base == "" {
+		base = "https://api.telegram.org"
+	}
+	fileURL := fmt.Sprintf("%s/file/bot%s/%s", base, t.Token, gf.Result.FilePath)
+	freq, err := http.NewRequestWithContext(ctx, "GET", fileURL, nil)
+	if err != nil {
+		return "", err
+	}
+	fresp, err := t.client.Do(freq)
+	if err != nil {
+		return "", err
+	}
+	defer fresp.Body.Close()
+	if fresp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download: status %d", fresp.StatusCode)
+	}
+
+	dir := os.Getenv("H2_DIR")
+	if dir == "" {
+		dir = "."
+	}
+	mediaDir := filepath.Join(dir, "media", "telegram")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		return "", err
+	}
+	ext := filepath.Ext(gf.Result.FilePath)
+	if ext == "" {
+		ext = filepath.Ext(hintName)
+	}
+	dest := filepath.Join(mediaDir, fmt.Sprintf("%d%s", time.Now().UnixNano(), ext))
+	f, err := os.Create(dest)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, fresp.Body); err != nil {
+		return "", err
+	}
+	return dest, nil
+}
+
 // SendTyping sends a "typing" chat action to the configured chat.
 // The indicator is shown for ~5 seconds by Telegram.
 func (t *Telegram) SendTyping(ctx context.Context) error {
@@ -322,9 +434,30 @@ type update struct {
 }
 
 type message struct {
-	Text           string   `json:"text"`
-	Chat           chat     `json:"chat"`
-	ReplyToMessage *message `json:"reply_to_message,omitempty"`
+	Text           string      `json:"text"`
+	Caption        string      `json:"caption,omitempty"`
+	Photo          []photoSize `json:"photo,omitempty"`
+	Document       *document   `json:"document,omitempty"`
+	Chat           chat        `json:"chat"`
+	ReplyToMessage *message    `json:"reply_to_message,omitempty"`
+}
+
+type photoSize struct {
+	FileID string `json:"file_id"`
+}
+
+type document struct {
+	FileID   string `json:"file_id"`
+	FileName string `json:"file_name,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
+type getFileResponse struct {
+	OK          bool   `json:"ok"`
+	Description string `json:"description,omitempty"`
+	Result      struct {
+		FilePath string `json:"file_path"`
+	} `json:"result"`
 }
 
 type chat struct {
