@@ -851,19 +851,5 @@ func queryBridge(sockPath string) *message.BridgeInfo {
 
 // queryAgent connects to a socket path and queries agent status.
 func queryAgent(sockPath string) *message.AgentInfo {
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
-	if err != nil {
-		return nil
-	}
-	defer conn.Close()
-
-	if err := message.SendRequest(conn, &message.Request{Type: "status"}); err != nil {
-		return nil
-	}
-
-	resp, err := message.ReadResponse(conn)
-	if err != nil || !resp.OK {
-		return nil
-	}
-	return resp.Agent
+	return message.QueryAgentInfo(sockPath, 2*time.Second)
 }
