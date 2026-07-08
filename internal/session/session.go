@@ -405,6 +405,41 @@ func (s *Session) pipeOutputCallback() func() {
 	}
 }
 
+// installDaemonOnDeliver wires daemon-mode delivery renders. It is factored for
+// targeted panic-recovery tests; RunDaemon remains the production caller.
+func (s *Session) installDaemonOnDeliver() {
+	s.OnDeliver = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic recovered in OnDeliver (daemon): %v\n%s\n", r, debug.Stack())
+			}
+		}()
+		s.VT.Mu.Lock()
+		defer s.VT.Mu.Unlock()
+		s.ForEachClient(func(cl *client.Client) {
+			cl.RenderStatusBar()
+		})
+	}
+}
+
+// installInteractiveOnDeliver wires interactive-mode delivery renders. It is
+// factored for targeted panic-recovery tests; RunInteractive remains the
+// production caller.
+func (s *Session) installInteractiveOnDeliver() {
+	s.OnDeliver = func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Fprintf(os.Stderr, "panic recovered in OnDeliver (interactive): %v\n%s\n", r, debug.Stack())
+			}
+		}()
+		s.VT.Mu.Lock()
+		defer s.VT.Mu.Unlock()
+		s.ForEachClient(func(cl *client.Client) {
+			cl.RenderStatusBar()
+		})
+	}
+}
+
 // RunDaemon runs the session in daemon mode: creates VT, client, PTY,
 // starts adapter+monitor, socket listener, and manages the child process lifecycle.
 // Blocks until the child exits and the user quits.
@@ -453,21 +488,7 @@ func (s *Session) RunDaemon() error {
 	s.Client = s.NewClient()
 	s.AddClient(s.Client)
 
-	// Set up delivery callback (queue count update → status bar only).
-	// Uses defer unlock + recover so a render panic cannot kill the
-	// delivery goroutine or deadlock the VT mutex.
-	s.OnDeliver = func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "panic recovered in OnDeliver (daemon): %v\n%s\n", r, debug.Stack())
-			}
-		}()
-		s.VT.Mu.Lock()
-		defer s.VT.Mu.Unlock()
-		s.ForEachClient(func(cl *client.Client) {
-			cl.RenderStatusBar()
-		})
-	}
+	s.installDaemonOnDeliver()
 
 	// Set up agent: activity logger, adapter, launch config.
 	if err := s.setupAgent(); err != nil {
@@ -549,21 +570,7 @@ func (s *Session) RunInteractive() error {
 	s.Client.Output = os.Stdout
 	s.VT.InputSrc = os.Stdin
 
-	// Set up delivery callback (queue count update → status bar only).
-	// Uses defer unlock + recover so a render panic cannot kill the
-	// delivery goroutine or deadlock the VT mutex.
-	s.OnDeliver = func() {
-		defer func() {
-			if r := recover(); r != nil {
-				fmt.Fprintf(os.Stderr, "panic recovered in OnDeliver (interactive): %v\n%s\n", r, debug.Stack())
-			}
-		}()
-		s.VT.Mu.Lock()
-		defer s.VT.Mu.Unlock()
-		s.ForEachClient(func(cl *client.Client) {
-			cl.RenderStatusBar()
-		})
-	}
+	s.installInteractiveOnDeliver()
 
 	// Set up agent: activity logger, adapter, launch config.
 	if err := s.setupAgent(); err != nil {
