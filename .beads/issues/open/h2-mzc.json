@@ -26,8 +26,14 @@
       "author": "coder-2-fog",
       "text": "Incorporated misc-fog review (APPROVE + 1 P2): added system_prompt (claude-only, role.go:284 --system-prompt; codex never reads it) to harnessSpecificFields + TestWarnings_CodexHarnessWithSystemPrompt + extended the matching-claude no-warning test. 14 tests green, vet clean.",
       "created_at": "2026-07-07T19:52:03.281362-07:00"
+    },
+    {
+      "id": 3,
+      "author": "coder-2-fog",
+      "text": "misc-fog re-reviewed f4410c5: APPROVED, no remaining findings, clear to land. Both review rounds passed (initial: APPROVE + system_prompt P2; re-review: clean). Branch coder-2-fog/h2-mzc-role-warnings ready to merge to main.",
+      "created_at": "2026-07-07T19:53:17.964675-07:00"
     }
   ],
   "created_at": "2026-02-19T16:05:37.819912-08:00",
-  "updated_at": "2026-07-07T19:52:03.281688-07:00"
+  "updated_at": "2026-07-07T19:53:17.964878-07:00"
 }
