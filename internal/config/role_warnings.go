@@ -20,6 +20,7 @@ type harnessSpecificField struct {
 var harnessSpecificFields = []harnessSpecificField{
 	{"claude_code_config_path_prefix", "claude_code", func(r *Role) bool { return r.ClaudeCodeConfigPathPrefix != "" }},
 	{"claude_permission_mode", "claude_code", func(r *Role) bool { return r.ClaudePermissionMode != "" }},
+	{"system_prompt", "claude_code", func(r *Role) bool { return r.SystemPrompt != "" }},
 	{"hooks", "claude_code", func(r *Role) bool { return yamlNodeSet(r.Hooks) }},
 	{"settings", "claude_code", func(r *Role) bool { return yamlNodeSet(r.Settings) }},
 	{"codex_config_path_prefix", "codex", func(r *Role) bool { return r.CodexConfigPathPrefix != "" }},

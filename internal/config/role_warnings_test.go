@@ -57,6 +57,11 @@ func TestWarnings_CodexHarnessWithSettings(t *testing.T) {
 	wantWarning(t, r.Warnings(), "settings", "codex", "claude_code")
 }
 
+func TestWarnings_CodexHarnessWithSystemPrompt(t *testing.T) {
+	r := &Role{RoleName: "r", AgentHarness: "codex", SystemPrompt: "you are a helpful agent"}
+	wantWarning(t, r.Warnings(), "system_prompt", "codex", "claude_code")
+}
+
 func TestWarnings_ClaudeHarnessWithCodexSandboxMode(t *testing.T) {
 	r := &Role{RoleName: "r", AgentHarness: "claude_code", CodexSandboxMode: "danger-full-access"}
 	wantWarning(t, r.Warnings(), "codex_sandbox_mode", "claude_code", "codex")
@@ -85,6 +90,7 @@ func TestWarnings_MatchingClaudeFieldsNoWarning(t *testing.T) {
 		AgentHarness:               "claude_code",
 		ClaudePermissionMode:       "plan",
 		ClaudeCodeConfigPathPrefix: "/tmp/cc",
+		SystemPrompt:               "you are a helpful agent",
 		Hooks:                      yamlNode(t, "PreToolUse: []"),
 		Settings:                   yamlNode(t, "model: opus"),
 	}
