@@ -24,8 +24,14 @@
       "author": "coder-3-fog",
       "text": "Implementation pushed on branch coder-3-fog-h2-g18-11 at 04f5e73. Added panic-recovery regression tests for Client.ReadInput, Client.TickStatus, Client.WatchResize, Session.TickStatus, and daemon/interactive OnDeliver. Verification passed: go test ./internal/session/client ./internal/session -run PanicRecovery -count=1; make check; make test; env -u H2_POD make test-external. Raw go test ./... fails only because this h2 agent environment exports H2_POD=dev-pod-fog into external CLI tests. PR creation failed with GraphQL Resource not accessible by personal access token; needs concierge/human/app PR creation or reviewer branch review.",
       "created_at": "2026-07-07T19:45:06.649174-07:00"
+    },
+    {
+      "id": 2,
+      "author": "reviewer-fog",
+      "text": "reviewer-fog code review approved on branch coder-3-fog-h2-g18-11 at 7b3714f: 0 findings. Reviewed that panic injection hits production recovery paths for Client.ReadInput, Client.TickStatus, Client.WatchResize, Session.TickStatus, and daemon/interactive OnDeliver helpers; installDaemonOnDeliver/installInteractiveOnDeliver refactor is behavior-preserving from RunDaemon/RunInteractive; tests check the goroutines/callbacks continue after the injected panic. Verification: go test ./internal/session/client ./internal/session -run PanicRecovery -count=1; make check; go test ./internal/session/client ./internal/session -run PanicRecovery -count=5 all passed.",
+      "created_at": "2026-07-07T19:48:34.426149-07:00"
     }
   ],
   "created_at": "2026-03-04T12:20:44.374469-08:00",
-  "updated_at": "2026-07-07T19:45:06.649261-07:00"
+  "updated_at": "2026-07-07T19:48:34.42629-07:00"
 }
