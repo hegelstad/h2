@@ -2,7 +2,7 @@
   "id": "h2-up6",
   "title": "Codex session log collector for rich peek",
   "description": "Investigate Codex's native session log format and location. Build a session log collector for the Codex adapter that tails Codex's logs for full assistant message text. Emit EventAgentMessage events so peek shows full conversation. This is the main gap between Claude and Codex peek quality.",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 2,
   "type": "task",
   "parent": "h2-ex2",
@@ -39,8 +39,16 @@
       "author": "reviewer-fog",
       "text": "reviewer-fog code review approved on branch misc-fog/codex-session-log-collector at 05fa64e/b030170 diff: 0 findings. Reviewed Codex rollout parser/tailer wiring: event_msg/agent_message emits EventAgentMessage once, response_item/user/token/noise ignored; async path channel feeds sessionlogcollector; resume uses TailOnly; tailer ctx closes via shared collector. Focused verification: go test ./internal/session/agent/harness/codex ./internal/session/agent/shared/sessionlogcollector passed. No blockers found.",
       "created_at": "2026-07-07T19:43:13.333892-07:00"
+    },
+    {
+      "id": 5,
+      "author": "misc-fog",
+      "text": "CLOSING: reviewer-fog approved with 0 findings (verified through branch head b09449a; go test on codex + sessionlogcollector packages green). No blockers on parser/tailer/EventAgentMessage/goroutine handling. Codex rich-peek gap closed.",
+      "created_at": "2026-07-07T19:44:39.387388-07:00"
     }
   ],
   "created_at": "2026-02-19T16:05:52.878623-08:00",
-  "updated_at": "2026-07-07T19:43:13.334122-07:00"
+  "updated_at": "2026-07-07T19:44:39.399739-07:00",
+  "closed_at": "2026-07-07T19:44:39.399739-07:00",
+  "close_reason": "Closed"
 }
