@@ -14,6 +14,14 @@
   ],
   "created_by": "Danny Cosson",
   "owner": "dcosson@gmail.com",
+  "comments": [
+    {
+      "id": 1,
+      "author": "coder-2-fog",
+      "text": "EVALUATION (eval-first, concierge-approved lean deliverable — document seam, do not wire).\n\nFINDING: No current agent type needs non-PTY input. The harness registry has exactly 3 types — claude_code, codex, generic (harness.go ValidHarnessTypes) — all interactive CLIs driven through a PTY; input is delivered by writing to the PTY master. No Pi/non-PTY agent exists (the only sendMessage in-repo is the Telegram bridge).\n\nSTATE OF THE SEAM: InputSender + PTYInputSender (internal/session/agent/harness/harness.go) are DEAD CODE — zero non-test callers. They were moved 'unchanged' from the legacy adapter/ package during the harness refactor (docs/plan-agent-harness-refactor.md:423) and never wired. The LIVE input path is session/message.RunDelivery -\u003e DeliveryConfig.PtyWriter (io.Writer) + SignalInterrupt (func), in internal/session/message/delivery.go:138-180, bypassing InputSender entirely.\n\nTWO GAPS a real wiring must close (so this isn't a byte-for-byte swap):\n1. deliver() is TUI-shaped: 0x03 Ctrl+C, type-text-then-\\r with a 50ms UI-settle delay, inline-vs-file-reference by body length. An API sendMessage(text) is one atomic call — those mechanics belong behind SendInput.\n2. The live interrupt is TWO parts: raw 0x03 to the PTY AND harness.HandleInterrupt() via session.SignalInterrupt (session.go). PTYInputSender.SendInterrupt only does the 0x03, so the interface's interrupt contract must grow.\n\nRECOMMENDATION (approved): don't wire speculatively — no consumer to validate against, and deliver() is the live-fleet input hot path. Wire when a real non-PTY agent (Pi) lands, against its actual API semantics. Deliverable: annotated the InputSender doc-comment (harness.go) recording the finding + the exact future wiring point + the two gaps. Comment-only, builds/vets clean. Ready for review.",
+      "created_at": "2026-07-07T19:52:49.110642-07:00"
+    }
+  ],
   "created_at": "2026-02-19T16:06:05.343505-08:00",
-  "updated_at": "2026-02-19T16:06:05.343505-08:00"
+  "updated_at": "2026-07-07T19:52:49.110821-07:00"
 }

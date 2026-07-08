@@ -104,9 +104,29 @@ type LaunchConfig struct {
 	PrependArgs []string          // args to prepend before user args
 }
 
-// InputSender delivers input to an agent process.
-// The default implementation writes to PTY stdin, but agent types
-// with richer APIs can override this.
+// InputSender is the seam for delivering input to an agent whose transport is NOT a
+// PTY. It is intentionally forward-looking: as evaluated in h2-hsp (Phase 3), every
+// registered agent type — claude_code, codex, generic — is an interactive CLI driven
+// through a PTY, so NONE needs this today and the live input path does not go through
+// it. Message delivery writes to the PTY master directly via
+// session/message.DeliveryConfig.PtyWriter (plus SignalInterrupt for Ctrl+C).
+//
+// A future non-PTY agent (e.g. a Pi Agent exposing sendMessage) would implement this
+// interface, and session/message.deliver would route through the harness's InputSender
+// instead of PtyWriter. Two things must be reconciled when that happens, because
+// today's deliver() is TUI-shaped and can't be swapped byte-for-byte:
+//   - Orchestration: deliver() types text then writes '\r' after a ~50ms UI-settle
+//     delay and inlines-vs-file-references by body length. An API sendMessage is one
+//     atomic call with none of that, so those per-transport mechanics belong behind
+//     SendInput rather than in the shared delivery loop.
+//   - Interrupt: the live interrupt is TWO parts — raw 0x03 to the PTY AND
+//     harness.HandleInterrupt() (via session.SignalInterrupt). PTYInputSender.SendInterrupt
+//     below only writes 0x03, so SendInterrupt's contract must grow to cover the
+//     harness-level interrupt before this seam can replace SignalInterrupt.
+//
+// Do not wire this speculatively: with no non-PTY consumer to validate against, and the
+// delivery loop being the live-fleet input hot path, the correct time to wire it is when
+// a real non-PTY agent lands, against its actual API semantics.
 type InputSender interface {
 	// SendInput delivers text input to the agent.
 	SendInput(text string) error
