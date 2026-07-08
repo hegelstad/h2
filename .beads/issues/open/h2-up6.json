@@ -21,8 +21,14 @@
       "author": "misc-fog",
       "text": "Investigation complete. Findings:\n\nCodex native session logs = rollout JSONL at $CODEX_HOME/sessions/YYYY/MM/DD/rollout-\u003cts\u003e-\u003cconvID\u003e.jsonl. Harness ALREADY discovers this path via SetOnConversationStarted (glob on conversation.id) → sets rc.NativeLogPathSuffix. The gap: nothing tails it. Claude's harness.Start() launches sessionlogcollector.New(path, OnSessionLogLine); Codex's Start() does not.\n\nAssistant text appears in two forms per message: (a) response_item{payload.type=message, role=assistant, content[].output_text} and (b) the flat event_msg{payload.type=agent_message, message, phase}. I'll parse form (b) only (avoids double-emit; stable across codex 0.x versions I checked back to 2026-06-01). phase is 'commentary' | 'final_answer' — emit both (matches Claude emitting all assistant text blocks). Skip user_message/token_count/task_*/reasoning.\n\nWiring: path is discovered async (unlike Claude's launch-time path), so Start() will wait on a channel fed by the conversation-started callback, then tail. Resume → NewTailOnly to avoid replaying prior conversation. Emitted EventAgentMessage flows internalCh→Start→monitor→eventstore→peek (peek already renders EventAgentMessage). TDD next.",
       "created_at": "2026-07-07T19:03:03.201896-07:00"
+    },
+    {
+      "id": 2,
+      "author": "misc-fog",
+      "text": "Implementation done + pushed (commit 9ed474d on misc-fog/codex-session-log-collector).\n\nWhat shipped:\n- codex/event_handler.go: parseCodexSessionLine + OnSessionLogLine — parses event_msg/agent_message rollout lines → EventAgentMessage (commentary + final_answer). Parses the flat event_msg form only (not the duplicate response_item/message) so each message emits once.\n- codex/harness.go: Start() launches a tailer that waits on sessionLogPathCh (fed by the existing conversation-started glob callback), then tails via the shared sessionlogcollector. Resume → NewTailOnly. Mirrors the Claude harness pattern.\n- codex/session_log_test.go: 8 unit tests (agent_message, commentary, user_message/response_item/token_count/empty/invalid → no emit, tailer end-to-end) + a full harness-integration test (real OTEL conversation_starts → glob → tail → EventAgentMessage).\n\nVerification:\n- All codex + eventstore + peek FormatAgentEvent tests pass; make check (vet/staticcheck/gofmt) clean.\n- Real-data parity: ran parser over an actual 2690-line rollout — emitted 165 messages, exactly matching jq's ground-truth count of non-empty agent_messages.\n- Full 'make test': only failures are TestQAAuth_Integration / TestRunQASetup_Integration (Docker QA integration flakes, 60s timeouts, zero references to my change areas) — pre-existing, unrelated.\n\nReady for review. Waiting on a reviewer before close.",
+      "created_at": "2026-07-07T19:15:31.44375-07:00"
     }
   ],
   "created_at": "2026-02-19T16:05:52.878623-08:00",
-  "updated_at": "2026-07-07T19:03:03.201969-07:00"
+  "updated_at": "2026-07-07T19:15:31.446398-07:00"
 }
