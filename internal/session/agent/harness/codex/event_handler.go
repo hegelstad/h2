@@ -128,6 +128,16 @@ func (p *EventHandler) OnMetricsRaw(body []byte) {
 	p.debugf("received /v1/metrics payload bytes=%d", len(body))
 }
 
+// OnSessionLogLine parses one Codex rollout JSONL line and emits an
+// EventAgentMessage for each assistant message. OTEL telemetry carries no
+// message text, so the rollout log is the only source of full assistant
+// content for peek.
+func (p *EventHandler) OnSessionLogLine(line []byte) {
+	if ev, ok := parseCodexSessionLine(line); ok {
+		p.emit(ev)
+	}
+}
+
 func (p *EventHandler) processTraces(payload otelTracesPayload) (spanCount int, emittedCount int, unknown []string) {
 	now := time.Now()
 	unknownSet := make(map[string]struct{})
@@ -593,6 +603,49 @@ type otelAttribute struct {
 type otelAttrValue struct {
 	StringValue string          `json:"stringValue,omitempty"`
 	IntValue    json.RawMessage `json:"intValue,omitempty"`
+}
+
+// --- Codex rollout session log parsing ---
+
+// codexRolloutLine is the outer envelope of a Codex rollout JSONL line.
+type codexRolloutLine struct {
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload,omitempty"`
+}
+
+// codexAgentMessagePayload is the payload of an event_msg/agent_message line.
+// Codex records assistant text twice per message — as a nested response_item
+// (role=assistant, output_text blocks) and as this flat event_msg. We parse
+// only this form so each message emits a single EventAgentMessage.
+type codexAgentMessagePayload struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Phase   string `json:"phase"`
+}
+
+// parseCodexSessionLine parses one rollout JSONL line into an EventAgentMessage
+// if it is an assistant message. Both commentary (interstitial) and
+// final_answer phases are emitted — they are all visible assistant text.
+func parseCodexSessionLine(line []byte) (monitor.AgentEvent, bool) {
+	var entry codexRolloutLine
+	if err := json.Unmarshal(line, &entry); err != nil {
+		return monitor.AgentEvent{}, false
+	}
+	if entry.Type != "event_msg" || len(entry.Payload) == 0 {
+		return monitor.AgentEvent{}, false
+	}
+	var pl codexAgentMessagePayload
+	if err := json.Unmarshal(entry.Payload, &pl); err != nil {
+		return monitor.AgentEvent{}, false
+	}
+	if pl.Type != "agent_message" || pl.Message == "" {
+		return monitor.AgentEvent{}, false
+	}
+	return monitor.AgentEvent{
+		Type:      monitor.EventAgentMessage,
+		Timestamp: time.Now(),
+		Data:      monitor.AgentMessageData{Content: pl.Message},
+	}, true
 }
 
 // reResetsInSeconds extracts the "resets_in_seconds" value from a Codex
