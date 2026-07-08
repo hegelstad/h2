@@ -2,7 +2,7 @@
   "id": "h2-hsp",
   "title": "Richer InputSender implementations as needed",
   "description": "Evaluate if any agent types need non-PTY input methods. If so, implement API-based InputSender (e.g. for future Pi Agent with sendMessage). Wire InputSender selection into adapter PrepareForLaunch or NewAdapter.",
-  "status": "open",
+  "status": "closed",
   "priority": 2,
   "type": "task",
   "parent": "h2-ex2",
@@ -23,5 +23,7 @@
     }
   ],
   "created_at": "2026-02-19T16:06:05.343505-08:00",
-  "updated_at": "2026-07-07T19:52:49.110821-07:00"
+  "updated_at": "2026-07-07T19:53:39.365994-07:00",
+  "closed_at": "2026-07-07T19:53:39.365994-07:00",
+  "close_reason": "Closed"
 }
