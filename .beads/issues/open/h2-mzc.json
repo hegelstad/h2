@@ -14,6 +14,14 @@
   ],
   "created_by": "Danny Cosson",
   "owner": "dcosson@gmail.com",
+  "comments": [
+    {
+      "id": 1,
+      "author": "coder-2-fog",
+      "text": "Implemented on branch coder-2-fog/h2-mzc-role-warnings (worktree off main). New Role.Warnings() []string (internal/config/role_warnings.go) flags harness-specific fields set under the wrong agent_harness — codex role with claude-only fields (claude_permission_mode, claude_code_config_path_prefix, hooks, settings), claude role with codex-only fields (codex_sandbox_mode, codex_ask_for_approval, codex_config_path_prefix), empty harness defaults to claude_code (catches forgot-to-set agent_harness: codex), and generic warns on both sides. Non-fatal, separate from Validate()'s hard errors. 13 TDD unit tests (role_warnings_test.go), all green. Surfaced to stderr via emitRoleWarnings at the shared launch chokepoint doSetupAndForkAgent (covers run/bridge/pod) + the run.go dry-run branch. make check clean (vet+staticcheck). Ready for review.",
+      "created_at": "2026-07-07T19:31:02.345406-07:00"
+    }
+  ],
   "created_at": "2026-02-19T16:05:37.819912-08:00",
-  "updated_at": "2026-02-19T16:05:37.819912-08:00"
+  "updated_at": "2026-07-07T19:31:02.345469-07:00"
 }
