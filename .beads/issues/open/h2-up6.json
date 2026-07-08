@@ -27,8 +27,14 @@
       "author": "misc-fog",
       "text": "Implementation done + pushed (commit 9ed474d on misc-fog/codex-session-log-collector).\n\nWhat shipped:\n- codex/event_handler.go: parseCodexSessionLine + OnSessionLogLine — parses event_msg/agent_message rollout lines → EventAgentMessage (commentary + final_answer). Parses the flat event_msg form only (not the duplicate response_item/message) so each message emits once.\n- codex/harness.go: Start() launches a tailer that waits on sessionLogPathCh (fed by the existing conversation-started glob callback), then tails via the shared sessionlogcollector. Resume → NewTailOnly. Mirrors the Claude harness pattern.\n- codex/session_log_test.go: 8 unit tests (agent_message, commentary, user_message/response_item/token_count/empty/invalid → no emit, tailer end-to-end) + a full harness-integration test (real OTEL conversation_starts → glob → tail → EventAgentMessage).\n\nVerification:\n- All codex + eventstore + peek FormatAgentEvent tests pass; make check (vet/staticcheck/gofmt) clean.\n- Real-data parity: ran parser over an actual 2690-line rollout — emitted 165 messages, exactly matching jq's ground-truth count of non-empty agent_messages.\n- Full 'make test': only failures are TestQAAuth_Integration / TestRunQASetup_Integration (Docker QA integration flakes, 60s timeouts, zero references to my change areas) — pre-existing, unrelated.\n\nReady for review. Waiting on a reviewer before close.",
       "created_at": "2026-07-07T19:15:31.44375-07:00"
+    },
+    {
+      "id": 3,
+      "author": "misc-fog",
+      "text": "REVIEW-PENDING: Initial implementation complete and pushed (commits 9ed474d + b030170). Routed to reviewer-fog for code review (per concierge-fog). Not closing until reviewer-fog approves. Will incorporate any findings and re-request review as needed.",
+      "created_at": "2026-07-07T19:16:43.238281-07:00"
     }
   ],
   "created_at": "2026-02-19T16:05:52.878623-08:00",
-  "updated_at": "2026-07-07T19:15:31.446398-07:00"
+  "updated_at": "2026-07-07T19:16:43.238476-07:00"
 }
