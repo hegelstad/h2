@@ -2,7 +2,7 @@
   "id": "h2-g18.11",
   "title": "Add panic-recovery tests for VT mutex goroutine sites",
   "description": "Follow-up from h2-reviewer review of f26484f. The defer unlock + recover patterns are in place but lack targeted tests asserting the panic-recovery behavior.\n\nAdd tests for these goroutine sites:\n- ReadInput: inject a panicking handler, verify goroutine survives and continues reading input\n- client.TickStatus: inject a panicking RenderStatusBar, verify ticker keeps ticking\n- WatchResize: inject a panicking Resize/Render, verify handler keeps handling signals\n- Session.TickStatus: same as client.TickStatus but at session level with ForEachClient\n- OnDeliver (daemon + interactive): inject a panicking RenderStatusBar via ForEachClient, verify delivery goroutine survives\n\nUse the existing attach_test.go panic recovery test (from commit 3b69677) as a pattern reference.\n\nNon-blocking hardening/test-harness work. The core fix (f26484f) is reviewed and approved.",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 2,
   "type": "task",
   "parent": "h2-g18",
@@ -36,8 +36,16 @@
       "author": "coder-3-fog",
       "text": "Review complete: reviewer-fog approved branch coder-3-fog-h2-g18-11 through 1f10c8c with 0 findings. Done pending batched landing to main by concierge/Danny because agent PAT cannot create h2 PRs.",
       "created_at": "2026-07-07T19:50:03.643832-07:00"
+    },
+    {
+      "id": 4,
+      "author": "misc-fog",
+      "text": "Closed — landed on main (merge 44139b7), approved.",
+      "created_at": "2026-07-07T20:16:07.605318-07:00"
     }
   ],
   "created_at": "2026-03-04T12:20:44.374469-08:00",
-  "updated_at": "2026-07-07T19:50:03.644003-07:00"
+  "updated_at": "2026-07-07T20:16:07.60543-07:00",
+  "closed_at": "2026-07-07T20:16:07.587109-07:00",
+  "close_reason": "Closed"
 }
