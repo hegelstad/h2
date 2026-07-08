@@ -248,6 +248,7 @@ By default, uses the "default" role from ~/.h2/roles/default.yaml.
 					}
 				}
 				if dryRun {
+					emitRoleWarnings(role)
 					rc, err := resolveAgentConfig(name, role, pod, overrides, nil)
 					if err != nil {
 						return err

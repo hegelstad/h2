@@ -78,10 +78,24 @@ func setupAndForkAgent(name string, role *config.Role, detach bool, pod string, 
 	return doSetupAndForkAgent(name, role, detach, pod, podIndex, overrides, false)
 }
 
+// emitRoleWarnings prints a role's non-fatal config advisories to stderr (e.g. a codex
+// role that sets claude-only fields). Warnings never block a launch; they just flag
+// likely mistakes. Printed even for quiet/pod launches — they only appear when the role
+// is actually misconfigured.
+func emitRoleWarnings(role *config.Role) {
+	if role == nil {
+		return
+	}
+	for _, w := range role.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+}
+
 func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string, podIndex int, overrides []string, quiet bool) error {
 	if name == "" {
 		name = session.GenerateName()
 	}
+	emitRoleWarnings(role)
 	if err := ensureAgentSocketAvailable(name); err != nil {
 		return err
 	}

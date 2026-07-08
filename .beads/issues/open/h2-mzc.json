@@ -14,21 +14,38 @@
   ],
   "created_by": "Danny Cosson",
   "owner": "dcosson@gmail.com",
-  "assignee": "coder-2-fog",
   "comments": [
     {
       "id": 1,
-      "author": "misc-fog",
-      "text": "CODE REVIEW (misc-fog) of coder-2-fog/h2-mzc-role-warnings @ 2e46c4a — vs main.\n\nVERDICT: Approve with one recommended fix (P2). Core design is correct and well-tested; the one gap is catalog completeness.\n\nWHAT'S SOLID:\n- Trigger logic correct in both directions (f.owner != active \u0026\u0026 f.isSet); no false positives across the matrix. Verified all 13 unit tests pass + go vet clean on internal/config + internal/cmd.\n- stdout/stderr separation is clean: emitRoleWarnings → os.Stderr; printDryRun → stdout (and dry-run output is human text, not JSON). No output-path corruption.\n- Ordering is safe: Role.Validate() runs at load time (role.go:612), so by the time emitRoleWarnings runs the active harness is always a valid ValidHarnessTypes value or empty→claude_code default. No 'unknown harness warns everything' path.\n- All launch paths covered exactly once: run/bridge/pod → doSetupAndForkAgent → emitRoleWarnings; dry-run calls it directly then returns before setupAndForkAgent (no double-warn). Runs after ApplyOverrides so it reflects effective config.\n- Field catalog is complete on the codex side and for claude config/permission/hooks/settings.\n\nP2 FINDING (false negative — recommend fixing before merge; trivial):\n'system_prompt' is missing from harnessSpecificFields. It's a user-settable role field documented as Claude's --system-prompt (role.go:284) and is consumed ONLY by the claude harness (claude/harness.go:89); the codex harness reads Instructions only and never SystemPrompt. So a codex/generic role that sets system_prompt has it silently ignored — exactly the misuse class this feature exists to flag. Empirically verified: a codex role with SystemPrompt set → 0 warnings (control field claude_permission_mode → 1 warning).\nFIX: add {\"system_prompt\", \"claude_code\", func(r *Role) bool { return r.SystemPrompt != \"\" }} to the catalog + a test mirroring TestWarnings_CodexHarnessWithClaudePermissionMode.\n\nP3 NIT (optional, acceptable as-is): yamlNodeSet treats a present-but-null 'hooks:'/'settings:' (null scalar, Kind!=0) as set, so it would warn on an effectively-empty key. The realistic absent-key case decodes to the zero Node and is handled correctly; the null-present case is defensible (user did mention the key). No change required.\n\nRecommend: land after adding the system_prompt catalog entry + test. Everything else is merge-ready.",
-      "created_at": "2026-07-07T19:47:43.267345-07:00"
+      "author": "coder-2-fog",
+      "text": "Implemented on branch coder-2-fog/h2-mzc-role-warnings (worktree off main). New Role.Warnings() []string (internal/config/role_warnings.go) flags harness-specific fields set under the wrong agent_harness \u2014 codex role with claude-only fields (claude_permission_mode, claude_code_config_path_prefix, hooks, settings), claude role with codex-only fields (codex_sandbox_mode, codex_ask_for_approval, codex_config_path_prefix), empty harness defaults to claude_code (catches forgot-to-set agent_harness: codex), and generic warns on both sides. Non-fatal, separate from Validate()'s hard errors. 13 TDD unit tests (role_warnings_test.go), all green. Surfaced to stderr via emitRoleWarnings at the shared launch chokepoint doSetupAndForkAgent (covers run/bridge/pod) + the run.go dry-run branch. make check clean (vet+staticcheck). Ready for review.",
+      "created_at": "2026-07-07T19:31:02.345406-07:00"
     },
     {
       "id": 2,
       "author": "misc-fog",
-      "text": "RE-REVIEW (misc-fog) of f4410c5: APPROVED — no remaining findings. Verified the delta by inspection: (1) {system_prompt, claude_code, r.SystemPrompt != \"\"} added to harnessSpecificFields — resolves the P2 false negative; (2) TestWarnings_CodexHarnessWithSystemPrompt mirrors the established per-field pattern; (3) TestWarnings_MatchingClaudeFieldsNoWarning extended with SystemPrompt, proving no false positive under a matching claude_code harness. coder-2-fog reports 14 tests green + vet clean, consistent with the change. The earlier P3 nit (yamlNodeSet null-present) was optional/acceptable-as-is — no action needed. Ready to land.",
+      "text": "CODE REVIEW (misc-fog) of coder-2-fog/h2-mzc-role-warnings @ 2e46c4a \u2014 vs main.\n\nVERDICT: Approve with one recommended fix (P2). Core design is correct and well-tested; the one gap is catalog completeness.\n\nWHAT'S SOLID:\n- Trigger logic correct in both directions (f.owner != active && f.isSet); no false positives across the matrix. Verified all 13 unit tests pass + go vet clean on internal/config + internal/cmd.\n- stdout/stderr separation is clean: emitRoleWarnings \u2192 os.Stderr; printDryRun \u2192 stdout (and dry-run output is human text, not JSON). No output-path corruption.\n- Ordering is safe: Role.Validate() runs at load time (role.go:612), so by the time emitRoleWarnings runs the active harness is always a valid ValidHarnessTypes value or empty\u2192claude_code default. No 'unknown harness warns everything' path.\n- All launch paths covered exactly once: run/bridge/pod \u2192 doSetupAndForkAgent \u2192 emitRoleWarnings; dry-run calls it directly then returns before setupAndForkAgent (no double-warn). Runs after ApplyOverrides so it reflects effective config.\n- Field catalog is complete on the codex side and for claude config/permission/hooks/settings.\n\nP2 FINDING (false negative \u2014 recommend fixing before merge; trivial):\n'system_prompt' is missing from harnessSpecificFields. It's a user-settable role field documented as Claude's --system-prompt (role.go:284) and is consumed ONLY by the claude harness (claude/harness.go:89); the codex harness reads Instructions only and never SystemPrompt. So a codex/generic role that sets system_prompt has it silently ignored \u2014 exactly the misuse class this feature exists to flag. Empirically verified: a codex role with SystemPrompt set \u2192 0 warnings (control field claude_permission_mode \u2192 1 warning).\nFIX: add {\"system_prompt\", \"claude_code\", func(r *Role) bool { return r.SystemPrompt != \"\" }} to the catalog + a test mirroring TestWarnings_CodexHarnessWithClaudePermissionMode.\n\nP3 NIT (optional, acceptable as-is): yamlNodeSet treats a present-but-null 'hooks:'/'settings:' (null scalar, Kind!=0) as set, so it would warn on an effectively-empty key. The realistic absent-key case decodes to the zero Node and is handled correctly; the null-present case is defensible (user did mention the key). No change required.\n\nRecommend: land after adding the system_prompt catalog entry + test. Everything else is merge-ready.",
+      "created_at": "2026-07-07T19:47:43.267345-07:00"
+    },
+    {
+      "id": 3,
+      "author": "coder-2-fog",
+      "text": "Incorporated misc-fog review (APPROVE + 1 P2): added system_prompt (claude-only, role.go:284 --system-prompt; codex never reads it) to harnessSpecificFields + TestWarnings_CodexHarnessWithSystemPrompt + extended the matching-claude no-warning test. 14 tests green, vet clean.",
+      "created_at": "2026-07-07T19:52:03.281362-07:00"
+    },
+    {
+      "id": 4,
+      "author": "misc-fog",
+      "text": "RE-REVIEW (misc-fog) of f4410c5: APPROVED \u2014 no remaining findings. Verified the delta by inspection: (1) {system_prompt, claude_code, r.SystemPrompt != \"\"} added to harnessSpecificFields \u2014 resolves the P2 false negative; (2) TestWarnings_CodexHarnessWithSystemPrompt mirrors the established per-field pattern; (3) TestWarnings_MatchingClaudeFieldsNoWarning extended with SystemPrompt, proving no false positive under a matching claude_code harness. coder-2-fog reports 14 tests green + vet clean, consistent with the change. The earlier P3 nit (yamlNodeSet null-present) was optional/acceptable-as-is \u2014 no action needed. Ready to land.",
       "created_at": "2026-07-07T19:52:54.550999-07:00"
+    },
+    {
+      "id": 5,
+      "author": "coder-2-fog",
+      "text": "misc-fog re-reviewed f4410c5: APPROVED, no remaining findings, clear to land. Both review rounds passed (initial: APPROVE + system_prompt P2; re-review: clean). Branch coder-2-fog/h2-mzc-role-warnings ready to merge to main.",
+      "created_at": "2026-07-07T19:53:17.964675-07:00"
     }
   ],
   "created_at": "2026-02-19T16:05:37.819912-08:00",
-  "updated_at": "2026-07-07T19:52:54.551196-07:00"
+  "updated_at": "2026-07-07T19:53:17.964878-07:00"
 }
