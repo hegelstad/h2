@@ -2,7 +2,7 @@
   "id": "h2-up6",
   "title": "Codex session log collector for rich peek",
   "description": "Investigate Codex's native session log format and location. Build a session log collector for the Codex adapter that tails Codex's logs for full assistant message text. Emit EventAgentMessage events so peek shows full conversation. This is the main gap between Claude and Codex peek quality.",
-  "status": "open",
+  "status": "in_progress",
   "priority": 2,
   "type": "task",
   "parent": "h2-ex2",
@@ -15,6 +15,14 @@
   "created_by": "Danny Cosson",
   "owner": "dcosson@gmail.com",
   "assignee": "misc-fog",
+  "comments": [
+    {
+      "id": 1,
+      "author": "misc-fog",
+      "text": "Investigation complete. Findings:\n\nCodex native session logs = rollout JSONL at $CODEX_HOME/sessions/YYYY/MM/DD/rollout-\u003cts\u003e-\u003cconvID\u003e.jsonl. Harness ALREADY discovers this path via SetOnConversationStarted (glob on conversation.id) → sets rc.NativeLogPathSuffix. The gap: nothing tails it. Claude's harness.Start() launches sessionlogcollector.New(path, OnSessionLogLine); Codex's Start() does not.\n\nAssistant text appears in two forms per message: (a) response_item{payload.type=message, role=assistant, content[].output_text} and (b) the flat event_msg{payload.type=agent_message, message, phase}. I'll parse form (b) only (avoids double-emit; stable across codex 0.x versions I checked back to 2026-06-01). phase is 'commentary' | 'final_answer' — emit both (matches Claude emitting all assistant text blocks). Skip user_message/token_count/task_*/reasoning.\n\nWiring: path is discovered async (unlike Claude's launch-time path), so Start() will wait on a channel fed by the conversation-started callback, then tail. Resume → NewTailOnly to avoid replaying prior conversation. Emitted EventAgentMessage flows internalCh→Start→monitor→eventstore→peek (peek already renders EventAgentMessage). TDD next.",
+      "created_at": "2026-07-07T19:03:03.201896-07:00"
+    }
+  ],
   "created_at": "2026-02-19T16:05:52.878623-08:00",
-  "updated_at": "2026-07-07T18:56:47.118955-07:00"
+  "updated_at": "2026-07-07T19:03:03.201969-07:00"
 }
