@@ -18,6 +18,14 @@
     "project=h2-stability"
   ],
   "assignee": "coder-3-fog",
+  "comments": [
+    {
+      "id": 1,
+      "author": "coder-3-fog",
+      "text": "Implementation pushed on branch coder-3-fog-h2-g18-11 at 04f5e73. Added panic-recovery regression tests for Client.ReadInput, Client.TickStatus, Client.WatchResize, Session.TickStatus, and daemon/interactive OnDeliver. Verification passed: go test ./internal/session/client ./internal/session -run PanicRecovery -count=1; make check; make test; env -u H2_POD make test-external. Raw go test ./... fails only because this h2 agent environment exports H2_POD=dev-pod-fog into external CLI tests. PR creation failed with GraphQL Resource not accessible by personal access token; needs concierge/human/app PR creation or reviewer branch review.",
+      "created_at": "2026-07-07T19:45:06.649174-07:00"
+    }
+  ],
   "created_at": "2026-03-04T12:20:44.374469-08:00",
-  "updated_at": "2026-07-07T19:41:51.684862-07:00"
+  "updated_at": "2026-07-07T19:45:06.649261-07:00"
 }
