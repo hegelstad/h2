@@ -125,6 +125,43 @@ func TestEventHandler_APIError_429_UsageLimit(t *testing.T) {
 	}
 }
 
+func TestEventHandler_APIError_429_SessionLimit(t *testing.T) {
+	events := make(chan monitor.AgentEvent, 64)
+	h := NewEventHandler(events, nil)
+
+	payload := otelLogsPayload{
+		ResourceLogs: []otelResourceLogs{{
+			ScopeLogs: []otelScopeLogs{{
+				LogRecords: []otelLogRecord{{
+					Attributes: []otelAttribute{
+						{Key: "event.name", Value: otelAttrValue{StringValue: "api_error"}},
+						{Key: "status_code", Value: otelAttrValue{StringValue: "429"}},
+						{Key: "error", Value: otelAttrValue{StringValue: "You've hit your session limit · resets 6pm (America/Los_Angeles)"}},
+					},
+				}},
+			}},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	h.OnLogs(body)
+
+	got := drainEvents(events, 2)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 events (state_change + usage_limit_info), got %d", len(got))
+	}
+	state := got[0].Data.(monitor.StateChangeData)
+	if state.State != monitor.StateIdle || state.SubState != monitor.SubStateUsageLimit {
+		t.Errorf("state = (%v,%v), want (Idle,UsageLimit)", state.State, state.SubState)
+	}
+	if got[1].Type != monitor.EventUsageLimitInfo {
+		t.Fatalf("event[1].Type = %v, want EventUsageLimitInfo", got[1].Type)
+	}
+	ul := got[1].Data.(monitor.UsageLimitData)
+	if ul.ResetsAt.IsZero() {
+		t.Fatal("ResetsAt should be parsed from 'resets 6pm (America/Los_Angeles)'")
+	}
+}
+
 func TestEventHandler_APIError_500_ServerError(t *testing.T) {
 	events := make(chan monitor.AgentEvent, 64)
 	h := NewEventHandler(events, nil)
@@ -621,6 +658,91 @@ func TestEventHandler_OnSessionLogLine_UsageLimitNoResetTime(t *testing.T) {
 	}
 	if got[2].Type != monitor.EventAgentMessage {
 		t.Fatalf("event[2].Type = %v, want EventAgentMessage", got[2].Type)
+	}
+}
+
+// TestEventHandler_OnSessionLogLine_SessionLimitRealShape feeds the verbatim
+// session JSONL line Claude Code 2.1.206 writes when the account session limit
+// is hit (captured from a real session on 2026-07-10, only UUIDs shortened).
+func TestEventHandler_OnSessionLogLine_SessionLimitRealShape(t *testing.T) {
+	events := make(chan monitor.AgentEvent, 64)
+	h := NewEventHandler(events, nil)
+
+	line := `{"parentUuid":"864bea6c-bc3a-498a-a8dc-710fa8af0e7c","isSidechain":false,"type":"assistant","uuid":"6b596ec0-b5d6-4de1-af47-0666cd98ef33","timestamp":"2026-07-10T21:35:00.999Z","message":{"id":"27a26c22-3b28-42e3-a754-ac42abf01a10","container":null,"model":"<synthetic>","role":"assistant","stop_details":null,"stop_reason":"stop_sequence","stop_sequence":"","type":"message","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"server_tool_use":{"web_search_requests":0,"web_fetch_requests":0},"service_tier":null,"cache_creation":{"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0},"inference_geo":null,"iterations":null,"speed":null},"content":[{"type":"text","text":"You've hit your session limit · resets 6pm (America/Los_Angeles)"}],"context_management":null},"requestId":"req_011Ccu6VkxhLpaRaY1FW5mxw","error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429,"session_id":"546c6473-241c-4a9f-aa64-4c2c2b0da3c7","userType":"external","entrypoint":"cli","cwd":"/tmp/w","sessionId":"546c6473-241c-4a9f-aa64-4c2c2b0da3c7","version":"2.1.206","gitBranch":"HEAD"}`
+	h.OnSessionLogLine([]byte(line))
+
+	got := drainEvents(events, 3)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 events (state_change + usage_limit_info + agent_message), got %d", len(got))
+	}
+	state := got[0].Data.(monitor.StateChangeData)
+	if state.State != monitor.StateIdle || state.SubState != monitor.SubStateUsageLimit {
+		t.Fatalf("state = (%v,%v), want (Idle,UsageLimit)", state.State, state.SubState)
+	}
+	if got[1].Type != monitor.EventUsageLimitInfo {
+		t.Fatalf("event[1].Type = %v, want EventUsageLimitInfo", got[1].Type)
+	}
+	data := got[1].Data.(monitor.UsageLimitData)
+	loc, _ := time.LoadLocation("America/Los_Angeles")
+	inLA := data.ResetsAt.In(loc)
+	if inLA.Hour() != 18 || inLA.Minute() != 0 {
+		t.Fatalf("expected 6:00 PM LA time, got %v", inLA)
+	}
+}
+
+// TestEventHandler_OnSessionLogLine_SessionLimitNoResetTime covers the
+// "session limit" wording alone (no "resets ..." suffix for the regex to
+// match) — isUsageLimitMessage must recognize it directly.
+func TestEventHandler_OnSessionLogLine_SessionLimitNoResetTime(t *testing.T) {
+	events := make(chan monitor.AgentEvent, 64)
+	h := NewEventHandler(events, nil)
+
+	line, _ := json.Marshal(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role":    "assistant",
+			"model":   "<synthetic>",
+			"content": []map[string]string{{"type": "text", "text": "You've hit your session limit"}},
+		},
+		"error":             "rate_limit",
+		"isApiErrorMessage": true,
+		"apiErrorStatus":    429,
+	})
+	h.OnSessionLogLine(line)
+
+	got := drainEvents(events, 3)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 events, got %d", len(got))
+	}
+	state := got[0].Data.(monitor.StateChangeData)
+	if state.State != monitor.StateIdle || state.SubState != monitor.SubStateUsageLimit {
+		t.Fatalf("state = (%v,%v), want (Idle,UsageLimit)", state.State, state.SubState)
+	}
+	if got[1].Type != monitor.EventUsageLimitInfo {
+		t.Fatalf("event[1].Type = %v, want EventUsageLimitInfo", got[1].Type)
+	}
+}
+
+func TestIsUsageLimitMessage(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want bool
+	}{
+		{"You've hit your session limit · resets 6pm (America/Los_Angeles)", true},
+		{"You've hit your session limit", true},
+		{"Session limit reached · resets 3:50pm (America/Los_Angeles)", true},
+		{"You've hit your usage limit.", true},
+		{"You've hit your limit · resets 12pm (America/Los_Angeles)", true},
+		{"You've hit your org's monthly usage limit", true},
+		{"usage_limit_reached", true},
+		{"Claude usage limit reached|1783720800", true},
+		{"API Error: Server is temporarily limiting requests (not your usage limit) · Rate limited", false},
+		{"internal server error", false},
+	}
+	for _, tt := range tests {
+		if got := isUsageLimitMessage(tt.msg); got != tt.want {
+			t.Errorf("isUsageLimitMessage(%q) = %v, want %v", tt.msg, got, tt.want)
+		}
 	}
 }
 

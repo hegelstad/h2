@@ -475,7 +475,9 @@ func isUsageLimitMessage(content string) bool {
 	}
 	return strings.Contains(lower, "usage_limit_reached") ||
 		strings.Contains(lower, "usage limit reached") ||
+		strings.Contains(lower, "session limit reached") ||
 		strings.Contains(lower, "you've hit your usage limit") ||
+		strings.Contains(lower, "you've hit your session limit") ||
 		strings.Contains(lower, "you've hit your org's monthly usage limit") ||
 		strings.Contains(lower, "you've hit your limit")
 }

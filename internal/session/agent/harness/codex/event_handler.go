@@ -671,7 +671,9 @@ func parseCodexResetsAt(errMsg string, now time.Time) time.Time {
 // isUsageLimitError returns true if the error message indicates a usage limit.
 func isUsageLimitError(errMsg string) bool {
 	lower := strings.ToLower(errMsg)
-	return strings.Contains(lower, "usage limit") || strings.Contains(lower, "usage_limit_reached")
+	return strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "session limit") ||
+		strings.Contains(lower, "usage_limit_reached")
 }
 
 // reHumanResetsAt matches "try again at <date>" in Codex usage limit messages.
