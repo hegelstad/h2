@@ -598,16 +598,38 @@ func (s *Service) resolveDefaultTarget() string {
 	if concierge != "" && alive {
 		return concierge
 	}
-	if last != "" {
+	// The configured concierge may not have been liveness-probed yet (e.g.
+	// bridge and concierge starting concurrently) — probe it directly before
+	// considering fallbacks so inbound messages prefer the concierge whenever
+	// it is actually reachable.
+	if concierge != "" && s.agentReachable(concierge) {
+		return concierge
+	}
+	if last != "" && s.agentReachable(last) {
 		return last
 	}
 
-	// Fall back to first agent socket.
+	// Fall back to the first *reachable* agent socket. Socket files outlive
+	// their agents (a crashed daemon leaves its socket behind), so an
+	// unprobed pick here would route messages into a void.
 	agents, _ := socketdir.ListByTypeIn(s.socketDir, socketdir.TypeAgent)
-	if len(agents) > 0 {
-		return agents[0].Name
+	for _, a := range agents {
+		if s.agentReachable(a.Name) {
+			return a.Name
+		}
 	}
 	return ""
+}
+
+// agentReachable reports whether the named agent's socket accepts connections.
+func (s *Service) agentReachable(name string) bool {
+	sockPath := filepath.Join(s.socketDir, socketdir.Format(socketdir.TypeAgent, name))
+	conn, err := net.DialTimeout("unix", sockPath, 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
 }
 
 // firstAvailableAgent returns the name of the first agent socket in the
