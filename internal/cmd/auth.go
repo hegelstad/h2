@@ -18,7 +18,69 @@ func newAuthCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newAuthClaudeCmd())
+	cmd.AddCommand(newAuthGrokCmd())
 	return cmd
+}
+
+func newAuthGrokCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "grok [config-dir]",
+		Short: "Authenticate a Grok Build config directory",
+		Long: `Authenticate a Grok Build (GROK_HOME) config directory for use with h2 agents.
+
+If no config-dir is provided, authenticates the default shared config:
+  <H2Dir>/grok-config/default
+
+You can also specify a custom config directory:
+  h2 auth grok ~/.h2/grok-config/custom
+
+This runs 'grok login --device-auth' with GROK_HOME pointed at the config
+directory. Device-code authentication works on headless machines: you get a
+URL and code to open on any browser, signed in with the X/xAI account that
+holds your SuperGrok or X Premium+ subscription.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: runAuthGrok,
+	}
+}
+
+func runAuthGrok(cmd *cobra.Command, args []string) error {
+	var configDir string
+	if len(args) > 0 {
+		configDir = args[0]
+	} else {
+		configDir = config.DefaultGrokConfigDir()
+	}
+
+	// Expand ~ if present
+	if len(configDir) > 0 && configDir[0] == '~' {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("get home dir: %w", err)
+		}
+		configDir = home + configDir[1:]
+	}
+
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+
+	fmt.Printf("Launching 'grok login --device-auth' with GROK_HOME=%s\n", configDir)
+	fmt.Println("Open the URL shown below on any device and enter the code.")
+	fmt.Println()
+
+	grokCmd := exec.Command("grok", "login", "--device-auth")
+	grokCmd.Env = append(os.Environ(), fmt.Sprintf("GROK_HOME=%s", configDir))
+	grokCmd.Stdin = os.Stdin
+	grokCmd.Stdout = os.Stdout
+	grokCmd.Stderr = os.Stderr
+
+	if err := grokCmd.Run(); err != nil {
+		return fmt.Errorf("run grok login: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Printf("✓ Grok login flow completed for: %s\n", configDir)
+	return nil
 }
 
 func newAuthClaudeCmd() *cobra.Command {

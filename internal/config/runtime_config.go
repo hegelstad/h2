@@ -54,6 +54,7 @@ type RuntimeConfig struct {
 	ClaudePermissionMode string            `json:"claude_permission_mode,omitempty"`
 	CodexSandboxMode     string            `json:"codex_sandbox_mode,omitempty"`
 	CodexAskForApproval  string            `json:"codex_ask_for_approval,omitempty"`
+	GrokPermissionMode   string            `json:"grok_permission_mode,omitempty"`
 	PermissionReview     *PermissionReview `json:"permission_review,omitempty"`
 
 	// Additional directories.

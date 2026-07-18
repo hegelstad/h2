@@ -31,6 +31,7 @@ import (
 	_ "h2/internal/session/agent/harness/claude"
 	_ "h2/internal/session/agent/harness/codex"
 	_ "h2/internal/session/agent/harness/generic"
+	_ "h2/internal/session/agent/harness/grok"
 )
 
 // Session manages the message queue, delivery loop, observable state,
