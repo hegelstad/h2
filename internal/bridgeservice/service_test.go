@@ -594,32 +594,74 @@ func TestResolveDefaultTarget_ConciergeAlive(t *testing.T) {
 }
 
 func TestResolveDefaultTarget_ConciergeNotAlive(t *testing.T) {
-	svc := New(nil, "alice", "concierge", "", t.TempDir(), nil)
-	// conciergeAlive is false by default — should fall through to lastSender or first agent.
+	tmpDir := shortTempDir(t)
+	// conciergeAlive is false by default — should fall through to the
+	// reachable lastSender.
+	_ = newMockAgent(t, tmpDir, "agent1")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
 	svc.lastSender = "agent1"
 	if got := svc.resolveDefaultTarget(); got != "agent1" {
 		t.Errorf("expected agent1 (fallback), got %q", got)
 	}
 }
 
+func TestResolveDefaultTarget_ConciergeUnprobedButReachable(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	// conciergeAlive is false (not yet probed), but the concierge socket
+	// accepts connections — it must still win over lastSender.
+	_ = newMockAgent(t, tmpDir, "concierge")
+	_ = newMockAgent(t, tmpDir, "agent1")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
+	svc.lastSender = "agent1"
+	if got := svc.resolveDefaultTarget(); got != "concierge" {
+		t.Errorf("expected concierge (reachable), got %q", got)
+	}
+}
+
 func TestResolveDefaultTarget_LastSender(t *testing.T) {
-	svc := New(nil, "alice", "", "", t.TempDir(), nil)
+	tmpDir := shortTempDir(t)
+	_ = newMockAgent(t, tmpDir, "agent1")
+	svc := New(nil, "alice", "", "", tmpDir, nil)
 	svc.lastSender = "agent1"
 	if got := svc.resolveDefaultTarget(); got != "agent1" {
 		t.Errorf("expected agent1, got %q", got)
 	}
 }
 
-func TestResolveDefaultTarget_FirstAgent(t *testing.T) {
-	tmpDir := t.TempDir()
-	// Create fake socket files (don't need real listeners for this test).
+func TestResolveDefaultTarget_LastSenderStale_SkippedForLiveAgent(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	// lastSender has only a stale socket file (no listener); a live agent
+	// exists — the stale entry must be skipped.
+	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "ghost")), nil, 0o600)
+	_ = newMockAgent(t, tmpDir, "live")
+	svc := New(nil, "alice", "", "", tmpDir, nil)
+	svc.lastSender = "ghost"
+	if got := svc.resolveDefaultTarget(); got != "live" {
+		t.Errorf("expected live, got %q", got)
+	}
+}
+
+func TestResolveDefaultTarget_FirstReachableAgent(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	// "alpha" sorts first but is a stale socket file with no listener;
+	// "beta" is a live agent. beta must be chosen.
 	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "alpha")), nil, 0o600)
-	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "beta")), nil, 0o600)
+	_ = newMockAgent(t, tmpDir, "beta")
 	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeBridge, "alice")), nil, 0o600)
 
 	svc := New(nil, "alice", "", "", tmpDir, nil)
-	if got := svc.resolveDefaultTarget(); got != "alpha" {
-		t.Errorf("expected alpha, got %q", got)
+	if got := svc.resolveDefaultTarget(); got != "beta" {
+		t.Errorf("expected beta, got %q", got)
+	}
+}
+
+func TestResolveDefaultTarget_OnlyStaleSockets_Empty(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "ghost1")), nil, 0o600)
+	os.WriteFile(filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "ghost2")), nil, 0o600)
+	svc := New(nil, "alice", "", "", tmpDir, nil)
+	if got := svc.resolveDefaultTarget(); got != "" {
+		t.Errorf("expected empty (all sockets stale), got %q", got)
 	}
 }
 
