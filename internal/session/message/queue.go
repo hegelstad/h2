@@ -35,8 +35,16 @@ func (s QueueSnapshot) Total() int {
 
 // SteerAndIdleBacklog returns the count of undelivered steer/idle messages.
 // Interrupts are excluded because they bypass the normal steer/idle flow.
+// Also used by the monitor idle-staleness watchdog (h2-wkg) as the delivery
+// backlog signal (same set of priorities).
 func (s QueueSnapshot) SteerAndIdleBacklog() int {
 	return s.Normal + s.IdleFirst + s.Idle
+}
+
+// HasDeliveryBacklog is true when normal/idle work is waiting (for the
+// idle-staleness watchdog). Reuses SteerAndIdleBacklog.
+func (s QueueSnapshot) HasDeliveryBacklog() bool {
+	return s.SteerAndIdleBacklog() > 0
 }
 
 // HasIdleBacklog reports whether there is queued idle-priority work that an

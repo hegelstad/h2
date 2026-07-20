@@ -1,0 +1,26 @@
+{
+  "id": "h2-wkg",
+  "title": "Idle agent not woken by queued messages for ~48min (monitor stuck in StateActive)",
+  "description": "SYMPTOM (observed 2026-07-20): concierge agent had queued inter-agent messages sit undelivered for ~48 minutes despite the child process being alive and healthy. From the outside (ssh/ps/h2 status) it looked like a normal idle process, not a hang, which is why the diagnosis of 'stuck/frozen' was misleading and a disruptive restart was applied to a process that had in fact already recovered on its own.\n\nEVIDENCE (logs/session-activity.jsonl, concierge session 6ba15490, times UTC): clean Stop hook at 19:08:37; reviewer nudge messages arrived 19:09 and 19:46 and were written to messages/concierge/ but NOT delivered into the agent; no agent activity at all 19:08:37 -> 19:57:08; at 19:57:08 a UserPromptSubmit finally fired and normal processing resumed. So for ~48min IsIdle() was effectively false from the delivery loop's perspective even though the agent had Stopped.\n\nROOT-CAUSE SURFACE: internal/session/message/delivery.go RunDelivery only hands out normal-priority messages when IsIdle() is true (MessageQueue.Dequeue(idle,blocked)). IsIdle is wired in internal/session/session.go:818 to (state == monitor.StateIdle). The monitor only transitions Active->Idle when it receives an EventStateChange(StateIdle), which for Claude is emitted from a 'Stop'/'Interrupt' hook in internal/session/agent/harness/claude/event_handler.go:258. If that Stop->Idle transition never reaches the monitor, IsIdle stays false and normal messages are withheld indefinitely. The delivery loop has a 1s ticker so it keeps re-checking; the block is purely that IsIdle never returns true.\n\nTWO CANDIDATE MECHANISMS for the dropped Stop->Idle (need to confirm which):\n(a) Session-ID hook filter: event_handler.go:185 shouldIgnoreHookSession() drops ALL hook state emission (including Stop) when the incoming hook session_id != expectedSessionID (set via SetExpectedSessionID). If the child's Claude session_id diverged from the monitor's expected id (e.g. after a resume/compact/relaunch) without expectedSessionID being resynced, every Stop would be silently ignored for state purposes (still logged, line 183, which is why the Stop appears in the activity log yet had no effect). Self-recovery at 19:57 is consistent with a later SessionStart/UserPrompt resyncing the expected id.\n(b) Lossy event emit: event_handler.go:319 emit() is a non-blocking channel send with a default drop; monitor.go:116 subscriber fan-out is also lossy. Under backpressure a terminal Stop event could be dropped, leaving the monitor pinned in StateActive.\n\nPROPOSED FIX DIRECTIONS (pick after confirming cause; a+watchdog recommended as defense-in-depth / URP):\n1. Staleness watchdog in the monitor: it already tracks lastActivityAt (monitor.go:140). If state==Active with no events for > T (e.g. 2-3 min) AND there is a non-empty normal/idle queue backlog, reconcile to Idle (or actively re-probe the child) so delivery can proceed. This fixes the symptom regardless of which mechanism caused it.\n2. Make terminal Stop/SessionEnd transitions non-lossy (blocking or buffered-with-retry emit) so idle is never missed.\n3. Resync expectedSessionID whenever a SessionStarted/first-hook with a new non-empty session_id is seen, instead of silently ignoring mismatched hooks forever; at minimum log a visible warning when hooks are being ignored due to session mismatch.\n\nTESTS TO ADD: unit test in internal/session/message covering 'IsIdle stuck true-then-never-idle with queued normal msg -> watchdog delivers after T'; unit test in harness/claude that a Stop hook with a mismatched session_id does not permanently strand state (post-fix); regression test that a dropped Stop event is recovered by the watchdog.\n\nRELATED: echoes the Jul 10-18 bridge outage (bridge watchdog was added then). This is the in-process analogue: a wakeup/liveness gap between queued work and an idle agent.\n\nNOTE: ~/h2 .git is corrupt (no objects) per known hazard, so this bead file is written directly to disk and not committed via normal git flow.",
+  "status": "closed",
+  "priority": 1,
+  "type": "task",
+  "labels": [
+    "project=h2",
+    "area=session",
+    "area=delivery",
+    "bug"
+  ],
+  "assignee": "coder-1",
+  "created_by": "concierge",
+  "owner": "concierge",
+  "created_at": "2026-07-20T20:28:20Z",
+  "updated_at": "2026-07-21T00:42:00Z",
+  "comments": [
+    {
+      "author": "coder-1",
+      "at": "2026-07-21T00:42:00Z",
+      "text": "Fixed on fix/h2-wkg-wakeup-gap: (1) monitor idle-staleness watchdog (2m Active + backlog \u2192 Idle); (2) non-lossy emitTerminal for Stop/Interrupt/SessionStart/SessionEnd; (3) resync expectedSessionID on terminal hooks + warn on mismatch ignore. Tests: monitor watchdog x3, event_handler resync+terminal, delivery idle wait. make check && make test green."
+    }
+  ]
+}
