@@ -879,3 +879,99 @@ func TestProcessEvent_ServerError_NotClearedByZeroTokenTurn(t *testing.T) {
 		t.Fatalf("ServerErrorMessage should not be cleared by zero-token turn, got %q", m.ServerErrorMessage())
 	}
 }
+
+func TestIdleStalenessWatchdog_ReconcilesActiveToIdleWithBacklog(t *testing.T) {
+	reconciled := make(chan struct{}, 1)
+	hasBacklog := true
+	m := New(
+		WithBacklogCheck(func() bool { return hasBacklog }),
+		WithIdleStaleTimeout(30*time.Millisecond),
+		WithWatchdogInterval(15*time.Millisecond),
+		WithOnIdleReconcile(func() {
+			select {
+			case reconciled <- struct{}{}:
+			default:
+			}
+		}),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// Become Active with an old activity timestamp.
+	past := time.Now().Add(-time.Minute)
+	m.Events() <- AgentEvent{
+		Type:      EventStateChange,
+		Timestamp: past,
+		Data:      StateChangeData{State: StateActive, SubState: SubStateThinking},
+	}
+	// Let processEvent apply the past timestamp.
+	time.Sleep(20 * time.Millisecond)
+
+	select {
+	case <-reconciled:
+		// Watchdog fired.
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for idle-staleness reconcile")
+	}
+
+	st, _ := m.State()
+	if st != StateIdle {
+		t.Fatalf("state = %v, want Idle after watchdog", st)
+	}
+}
+
+func TestIdleStalenessWatchdog_NoBacklogKeepsActive(t *testing.T) {
+	m := New(
+		WithBacklogCheck(func() bool { return false }),
+		WithIdleStaleTimeout(20*time.Millisecond),
+		WithWatchdogInterval(10*time.Millisecond),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	past := time.Now().Add(-time.Minute)
+	m.Events() <- AgentEvent{
+		Type:      EventStateChange,
+		Timestamp: past,
+		Data:      StateChangeData{State: StateActive, SubState: SubStateThinking},
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	st, _ := m.State()
+	if st != StateActive {
+		t.Fatalf("state = %v, want Active when no backlog", st)
+	}
+}
+
+func TestIdleStalenessWatchdog_DroppedStopRecovered(t *testing.T) {
+	// Simulates a dropped Stop: agent left Active with stale activity and
+	// queued work; watchdog recovers Idle without needing the Stop event.
+	reconciled := make(chan struct{}, 1)
+	m := New(
+		WithBacklogCheck(func() bool { return true }),
+		WithIdleStaleTimeout(25*time.Millisecond),
+		WithWatchdogInterval(10*time.Millisecond),
+		WithOnIdleReconcile(func() { reconciled <- struct{}{} }),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// Active, then no further events (as if Stop was lost).
+	m.Events() <- AgentEvent{
+		Type:      EventStateChange,
+		Timestamp: time.Now().Add(-time.Hour),
+		Data:      StateChangeData{State: StateActive, SubState: SubStateThinking},
+	}
+
+	select {
+	case <-reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog did not recover from dropped Stop")
+	}
+	if st, _ := m.State(); st != StateIdle {
+		t.Fatalf("state = %v, want Idle", st)
+	}
+}

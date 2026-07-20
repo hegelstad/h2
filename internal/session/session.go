@@ -94,10 +94,18 @@ func (s *Session) Name() string { return s.RC.AgentName }
 
 // NewFromConfig creates a new Session from a fully resolved RuntimeConfig.
 func NewFromConfig(rc *config.RuntimeConfig) *Session {
+	q := message.NewMessageQueue()
+	mon := monitor.New(
+		// h2-wkg: if Active with no events for 2m and messages are waiting,
+		// force Idle so delivery can drain the queue.
+		monitor.WithBacklogCheck(func() bool {
+			return q.Snapshot().HasDeliveryBacklog()
+		}),
+	)
 	return &Session{
 		RC:         rc,
-		Queue:      message.NewMessageQueue(),
-		monitor:    monitor.New(),
+		Queue:      q,
+		monitor:    mon,
 		exitNotify: make(chan struct{}, 1),
 		stopCh:     make(chan struct{}),
 		relaunchCh: make(chan struct{}, 1),

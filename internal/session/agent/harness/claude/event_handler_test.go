@@ -1169,3 +1169,87 @@ func drainEvents(ch chan monitor.AgentEvent, n int) []monitor.AgentEvent {
 	}
 	return events
 }
+
+func TestEventHandler_StopMismatchedSession_ResyncsAndEmitsIdle(t *testing.T) {
+	// h2-wkg: Stop with a new session_id must not permanently strand Active.
+	events := make(chan monitor.AgentEvent, 64)
+	h := NewEventHandler(events, nil)
+	h.SetExpectedSessionID("old-session")
+
+	payload, _ := json.Marshal(map[string]string{"session_id": "new-session"})
+	if !h.ProcessHookEvent("Stop", payload) {
+		t.Fatal("expected Stop to be recognized")
+	}
+
+	got := drainEvents(events, 1)
+	if got[0].Type != monitor.EventStateChange {
+		t.Fatalf("Type = %v, want EventStateChange", got[0].Type)
+	}
+	sc := got[0].Data.(monitor.StateChangeData)
+	if sc.State != monitor.StateIdle {
+		t.Fatalf("State = %v, want Idle after mismatched Stop resync", sc.State)
+	}
+}
+
+func TestEventHandler_SessionStart_ResyncsExpectedSessionID(t *testing.T) {
+	events := make(chan monitor.AgentEvent, 64)
+	h := NewEventHandler(events, nil)
+	h.SetExpectedSessionID("parent-a")
+
+	// Mismatched non-terminal hooks still ignored.
+	payload, _ := json.Marshal(map[string]string{"tool_name": "Bash", "session_id": "parent-b"})
+	h.ProcessHookEvent("PreToolUse", payload)
+	select {
+	case ev := <-events:
+		t.Fatalf("unexpected event for mismatched PreToolUse: %+v", ev)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	// SessionStart with new id resyncs and emits Idle.
+	startPayload, _ := json.Marshal(map[string]string{"session_id": "parent-b"})
+	h.ProcessHookEvent("SessionStart", startPayload)
+	got := drainEvents(events, 1)
+	sc := got[0].Data.(monitor.StateChangeData)
+	if sc.State != monitor.StateIdle {
+		t.Fatalf("State = %v, want Idle", sc.State)
+	}
+
+	// After resync, hooks with parent-b are accepted.
+	h.ProcessHookEvent("PreToolUse", payload)
+	got = drainEvents(events, 2)
+	if got[0].Type != monitor.EventToolStarted {
+		t.Fatalf("Type = %v, want EventToolStarted after resync", got[0].Type)
+	}
+}
+
+func TestEventHandler_TerminalStop_NotDroppedOnFullChannel(t *testing.T) {
+	// Unbuffered channel: non-terminal emit would drop; terminal must block.
+	events := make(chan monitor.AgentEvent)
+	h := NewEventHandler(events, nil)
+
+	done := make(chan struct{})
+	go func() {
+		h.ProcessHookEvent("Stop", nil)
+		close(done)
+	}()
+
+	// Receiver slightly delayed to force the blocking path.
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case ev := <-events:
+		if ev.Type != monitor.EventStateChange {
+			t.Fatalf("Type = %v, want EventStateChange", ev.Type)
+		}
+		if sc := ev.Data.(monitor.StateChangeData); sc.State != monitor.StateIdle {
+			t.Fatalf("State = %v, want Idle", sc.State)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for terminal Stop event")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ProcessHookEvent did not return after emit")
+	}
+}

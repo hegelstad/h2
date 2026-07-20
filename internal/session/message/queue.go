@@ -39,6 +39,18 @@ func (s QueueSnapshot) SteerAndIdleBacklog() int {
 	return s.Normal + s.IdleFirst + s.Idle
 }
 
+// DeliveryBacklog reports undelivered messages that need an idle agent
+// (or at least a non-stuck delivery path) — used by the monitor idle-staleness
+// watchdog (h2-wkg). Interrupts are excluded (they always deliver).
+func (s QueueSnapshot) DeliveryBacklog() int {
+	return s.Normal + s.IdleFirst + s.Idle
+}
+
+// HasDeliveryBacklog is true when normal/idle work is waiting.
+func (s QueueSnapshot) HasDeliveryBacklog() bool {
+	return s.DeliveryBacklog() > 0
+}
+
 // HasIdleBacklog reports whether there is queued idle-priority work that an
 // idle-first message would jump ahead of.
 func (s QueueSnapshot) HasIdleBacklog() bool {

@@ -55,7 +55,22 @@ type AgentMonitor struct {
 	// Protected by subscribersMu (separate from mu to avoid contention).
 	subscribersMu sync.Mutex
 	subscribers   []chan<- AgentEvent
+
+	// Idle-staleness watchdog (h2-wkg): if Active with no events for longer
+	// than idleStaleTimeout and hasBacklog reports waiting messages, force Idle
+	// so the delivery loop can drain steer/idle queues.
+	hasBacklog       func() bool
+	idleStaleTimeout time.Duration
+	watchdogInterval time.Duration
+	onIdleReconcile  func() // optional test/observability hook
 }
+
+// DefaultIdleStaleTimeout is how long StateActive may sit without events
+// before the watchdog reconciling to Idle when a message backlog exists.
+const DefaultIdleStaleTimeout = 2 * time.Minute
+
+// DefaultWatchdogInterval is how often the idle-staleness watchdog ticks.
+const DefaultWatchdogInterval = 10 * time.Second
 
 // Option configures an AgentMonitor.
 type Option func(*AgentMonitor)
@@ -69,14 +84,50 @@ func WithEventWriter(fn func(AgentEvent) error) Option {
 	}
 }
 
+// WithBacklogCheck sets a function that returns true when undelivered
+// normal/idle messages are waiting. Used by the idle-staleness watchdog.
+func WithBacklogCheck(fn func() bool) Option {
+	return func(m *AgentMonitor) {
+		m.hasBacklog = fn
+	}
+}
+
+// WithIdleStaleTimeout overrides the Active→Idle staleness threshold.
+func WithIdleStaleTimeout(d time.Duration) Option {
+	return func(m *AgentMonitor) {
+		if d > 0 {
+			m.idleStaleTimeout = d
+		}
+	}
+}
+
+// WithWatchdogInterval overrides how often the idle-staleness watchdog runs.
+func WithWatchdogInterval(d time.Duration) Option {
+	return func(m *AgentMonitor) {
+		if d > 0 {
+			m.watchdogInterval = d
+		}
+	}
+}
+
+// WithOnIdleReconcile sets a callback invoked when the watchdog forces Idle
+// (tests and diagnostics).
+func WithOnIdleReconcile(fn func()) Option {
+	return func(m *AgentMonitor) {
+		m.onIdleReconcile = fn
+	}
+}
+
 // New creates an AgentMonitor.
 func New(opts ...Option) *AgentMonitor {
 	m := &AgentMonitor{
-		events:         make(chan AgentEvent, 256),
-		state:          StateInitialized,
-		stateChangedAt: time.Now(),
-		stateCh:        make(chan struct{}),
-		toolCounts:     make(map[string]int64),
+		events:           make(chan AgentEvent, 256),
+		state:            StateInitialized,
+		stateChangedAt:   time.Now(),
+		stateCh:          make(chan struct{}),
+		toolCounts:       make(map[string]int64),
+		idleStaleTimeout: DefaultIdleStaleTimeout,
+		watchdogInterval: DefaultWatchdogInterval,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -92,15 +143,89 @@ func (m *AgentMonitor) Events() chan<- AgentEvent {
 
 // Run processes events from the events channel until ctx is cancelled.
 // Each event updates the monitor's state and metrics, and is optionally
-// persisted via the event writer callback.
+// persisted via the event writer callback. A periodic idle-staleness
+// watchdog reconcilies stuck Active→Idle when a message backlog exists
+// (see h2-wkg).
 func (m *AgentMonitor) Run(ctx context.Context) error {
+	interval := m.watchdogInterval
+	if interval <= 0 {
+		interval = DefaultWatchdogInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case ev := <-m.events:
 			m.processEvent(ev)
+		case <-ticker.C:
+			m.maybeReconcileIdle()
 		case <-ctx.Done():
 			return nil
 		}
+	}
+}
+
+// maybeReconcileIdle forces StateIdle when the agent has been Active with
+// no events for idleStaleTimeout and hasBacklog reports queued work.
+// Cause-agnostic recovery for a missed Stop→Idle transition.
+func (m *AgentMonitor) maybeReconcileIdle() {
+	if m.hasBacklog == nil || !m.hasBacklog() {
+		return
+	}
+
+	m.mu.Lock()
+	reconciled := false
+	if m.state == StateActive && !m.lastActivityAt.IsZero() {
+		staleFor := time.Since(m.lastActivityAt)
+		if staleFor >= m.idleStaleTimeout {
+			m.setStateLocked(StateIdle, SubStateNone)
+			// Touch activity so we don't thrash if something keeps us Active.
+			m.lastActivityAt = time.Now()
+			reconciled = true
+		}
+	}
+	cb := m.onIdleReconcile
+	m.mu.Unlock()
+
+	if reconciled && cb != nil {
+		cb()
+	}
+}
+
+// ForceIdleForTest transitions to Idle immediately (tests only).
+func (m *AgentMonitor) ForceIdleForTest() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.state != StateExited {
+		m.setStateLocked(StateIdle, SubStateNone)
+	}
+}
+
+// SetBacklogCheck sets or replaces the backlog callback after construction.
+// Safe to call before Run.
+func (m *AgentMonitor) SetBacklogCheck(fn func() bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.hasBacklog = fn
+}
+
+// SetIdleStaleTimeout overrides the staleness threshold (tests / config).
+func (m *AgentMonitor) SetIdleStaleTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d > 0 {
+		m.idleStaleTimeout = d
+	}
+}
+
+// SetWatchdogInterval overrides the watchdog tick (tests). Must be called
+// before Run.
+func (m *AgentMonitor) SetWatchdogInterval(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if d > 0 {
+		m.watchdogInterval = d
 	}
 }
 
