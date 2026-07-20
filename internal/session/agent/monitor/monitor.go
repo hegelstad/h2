@@ -39,9 +39,12 @@ type AgentMonitor struct {
 	userPromptCount int64
 	toolCounts      map[string]int64
 
-	lastToolName        string
-	lastActivityAt      time.Time
-	toolUseCount        int64
+	lastToolName   string
+	lastActivityAt time.Time
+	toolUseCount   int64
+	// outstandingTools is ToolStarted count minus ToolCompleted; watchdog must
+	// not force Idle while a tool call is still in flight (Bash may run 10min).
+	outstandingTools    int64
 	blockedOnPermission bool
 	blockedToolName     string
 
@@ -169,6 +172,10 @@ func (m *AgentMonitor) Run(ctx context.Context) error {
 // maybeReconcileIdle forces StateIdle when the agent has been Active with
 // no events for idleStaleTimeout and hasBacklog reports queued work.
 // Cause-agnostic recovery for a missed Stop→Idle transition.
+//
+// Skips while a tool call is outstanding (ToolStarted without ToolCompleted):
+// long-running tools (e.g. Bash up to 10min) emit no events mid-call, and
+// force-delivering into the PTY mid-tool would corrupt the agent session.
 func (m *AgentMonitor) maybeReconcileIdle() {
 	if m.hasBacklog == nil || !m.hasBacklog() {
 		return
@@ -176,7 +183,7 @@ func (m *AgentMonitor) maybeReconcileIdle() {
 
 	m.mu.Lock()
 	reconciled := false
-	if m.state == StateActive && !m.lastActivityAt.IsZero() {
+	if m.state == StateActive && m.outstandingTools == 0 && !m.lastActivityAt.IsZero() {
 		staleFor := time.Since(m.lastActivityAt)
 		if staleFor >= m.idleStaleTimeout {
 			m.setStateLocked(StateIdle, SubStateNone)
@@ -314,6 +321,9 @@ func (m *AgentMonitor) processEvent(ev AgentEvent) {
 				m.lastToolName = data.ToolName
 			}
 		}
+		if m.outstandingTools > 0 {
+			m.outstandingTools--
+		}
 		m.blockedOnPermission = false
 		m.blockedToolName = ""
 
@@ -324,6 +334,7 @@ func (m *AgentMonitor) processEvent(ev AgentEvent) {
 			}
 		}
 		m.toolUseCount++
+		m.outstandingTools++
 		m.blockedOnPermission = false
 		m.blockedToolName = ""
 
@@ -592,6 +603,15 @@ func (m *AgentMonitor) ResetForRelaunch() {
 	m.setStateLocked(StateInitialized, SubStateNone)
 	m.blockedOnPermission = false
 	m.blockedToolName = ""
+	m.outstandingTools = 0
+}
+
+// OutstandingTools returns how many ToolStarted events have not yet been
+// matched by ToolCompleted (tests / diagnostics).
+func (m *AgentMonitor) OutstandingTools() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.outstandingTools
 }
 
 // AgentMetrics is a point-in-time copy of accumulated metrics.

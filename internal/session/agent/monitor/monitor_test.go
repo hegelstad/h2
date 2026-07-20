@@ -975,3 +975,71 @@ func TestIdleStalenessWatchdog_DroppedStopRecovered(t *testing.T) {
 		t.Fatalf("state = %v, want Idle", st)
 	}
 }
+
+func TestIdleStalenessWatchdog_SkipsWhileToolOutstanding(t *testing.T) {
+	// Long-running tool (e.g. Bash): ToolStarted then silence for minutes.
+	// Watchdog must NOT force Idle mid-call even with a backlog.
+	reconciled := make(chan struct{}, 1)
+	m := New(
+		WithBacklogCheck(func() bool { return true }),
+		WithIdleStaleTimeout(30*time.Millisecond),
+		WithWatchdogInterval(15*time.Millisecond),
+		WithOnIdleReconcile(func() {
+			select {
+			case reconciled <- struct{}{}:
+			default:
+			}
+		}),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	// Enter Active + start a tool with a stale timestamp (simulates long silence).
+	past := time.Now().Add(-time.Hour)
+	m.Events() <- AgentEvent{
+		Type:      EventStateChange,
+		Timestamp: past,
+		Data:      StateChangeData{State: StateActive, SubState: SubStateToolUse},
+	}
+	m.Events() <- AgentEvent{
+		Type:      EventToolStarted,
+		Timestamp: past,
+		Data:      ToolStartedData{ToolName: "Bash"},
+	}
+	time.Sleep(20 * time.Millisecond)
+	if m.OutstandingTools() != 1 {
+		t.Fatalf("OutstandingTools = %d, want 1", m.OutstandingTools())
+	}
+
+	// Wait well past the stale timeout; must stay Active.
+	select {
+	case <-reconciled:
+		t.Fatal("watchdog reconciled while tool call outstanding")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if st, _ := m.State(); st != StateActive {
+		t.Fatalf("state = %v, want Active while tool outstanding", st)
+	}
+
+	// Tool completes; activity is still stale — next tick should reconcile.
+	m.Events() <- AgentEvent{
+		Type:      EventToolCompleted,
+		Timestamp: past, // keep lastActivityAt stale
+		Data:      ToolCompletedData{ToolName: "Bash", Success: true},
+	}
+	// processEvent updates lastActivityAt to past; still stale for watchdog.
+	time.Sleep(20 * time.Millisecond)
+	if m.OutstandingTools() != 0 {
+		t.Fatalf("OutstandingTools = %d, want 0 after complete", m.OutstandingTools())
+	}
+
+	select {
+	case <-reconciled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("watchdog did not reconcile after tool completed")
+	}
+	if st, _ := m.State(); st != StateIdle {
+		t.Fatalf("state = %v, want Idle after tool finished and stale", st)
+	}
+}
