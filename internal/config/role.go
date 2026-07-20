@@ -172,10 +172,17 @@ var ValidCodexSandboxModes = []string{
 	"danger-full-access", // no filesystem restrictions
 }
 
+// ValidGrokPermissionModes lists all valid values for the grok_permission_mode
+// field. Grok Build adopts Claude Code's mode vocabulary and adds "auto".
+var ValidGrokPermissionModes = []string{
+	"default", "acceptEdits", "auto", "plan", "dontAsk", "bypassPermissions",
+}
+
 // ValidHarnessTypes lists valid values for the agent_harness field.
 var ValidHarnessTypes = []string{
 	"claude_code",
 	"codex",
+	"grok",
 	"generic",
 }
 
@@ -266,12 +273,13 @@ type Role struct {
 	Description string `yaml:"description,omitempty"`
 
 	// Harness fields.
-	AgentHarness               string `yaml:"agent_harness,omitempty"`                  // claude_code | codex | generic
+	AgentHarness               string `yaml:"agent_harness,omitempty"`                  // claude_code | codex | grok | generic
 	AgentModel                 string `yaml:"agent_model,omitempty"`                    // explicit model; empty => agent app's own default
 	AgentHarnessCommand        string `yaml:"agent_harness_command,omitempty"`          // command override for any harness
 	Profile                    string `yaml:"profile,omitempty"`                        // profile name (default: "default")
 	ClaudeCodeConfigPathPrefix string `yaml:"claude_code_config_path_prefix,omitempty"` // parent dir for Claude config profiles; default: <H2Dir>/claude-config
 	CodexConfigPathPrefix      string `yaml:"codex_config_path_prefix,omitempty"`       // parent dir for Codex config profiles; default: <H2Dir>/codex-config
+	GrokConfigPathPrefix       string `yaml:"grok_config_path_prefix,omitempty"`        // parent dir for Grok config profiles; default: <H2Dir>/grok-config
 
 	WorkingDir              string                 `yaml:"working_dir,omitempty"`               // agent CWD (default ".")
 	AdditionalDirs          []string               `yaml:"additional_dirs,omitempty"`           // extra dirs passed via --add-dir
@@ -291,6 +299,7 @@ type Role struct {
 	ClaudePermissionMode    string                 `yaml:"claude_permission_mode,omitempty"`    // Claude Code --permission-mode flag
 	CodexSandboxMode        string                 `yaml:"codex_sandbox_mode,omitempty"`        // Codex --sandbox flag
 	CodexAskForApproval     string                 `yaml:"codex_ask_for_approval,omitempty"`    // Codex --ask-for-approval flag
+	GrokPermissionMode      string                 `yaml:"grok_permission_mode,omitempty"`      // Grok Build --permission-mode flag
 	PermissionReview        *PermissionReview      `yaml:"permission_review,omitempty"`         // Permission handling strategies (DCG + AI reviewer)
 	Heartbeat               *HeartbeatConfig       `yaml:"heartbeat,omitempty"`
 	Triggers                []TriggerYAMLSpec      `yaml:"triggers,omitempty"`
@@ -491,6 +500,19 @@ func (r *Role) GetCodexConfigDir() string {
 	return filepath.Join(r.GetCodexConfigPathPrefix(), r.GetProfile())
 }
 
+// GetGrokConfigPathPrefix returns the Grok config path prefix, defaulting to <H2Dir>/grok-config.
+func (r *Role) GetGrokConfigPathPrefix() string {
+	if r.GrokConfigPathPrefix != "" {
+		return r.GrokConfigPathPrefix
+	}
+	return filepath.Join(ConfigDir(), "grok-config")
+}
+
+// GetGrokConfigDir returns the Grok config directory (prefix + profile).
+func (r *Role) GetGrokConfigDir() string {
+	return filepath.Join(r.GetGrokConfigPathPrefix(), r.GetProfile())
+}
+
 // GetProfile returns the selected profile name.
 func (r *Role) GetProfile() string {
 	if strings.TrimSpace(r.Profile) != "" {
@@ -507,6 +529,11 @@ func RolesDir() string {
 // DefaultClaudeConfigDir returns the default shared Claude config directory.
 func DefaultClaudeConfigDir() string {
 	return filepath.Join(ConfigDir(), "claude-config", "default")
+}
+
+// DefaultGrokConfigDir returns the default shared Grok config directory.
+func DefaultGrokConfigDir() string {
+	return filepath.Join(ConfigDir(), "grok-config", "default")
 }
 
 // GetClaudeConfigPathPrefix returns the Claude config path prefix, defaulting to <H2Dir>/claude-config.
@@ -1422,6 +1449,19 @@ func (r *Role) Validate() error {
 		if !valid {
 			return fmt.Errorf("invalid claude_permission_mode %q; valid values: %s",
 				r.ClaudePermissionMode, strings.Join(ValidClaudePermissionModes, ", "))
+		}
+	}
+	if r.GrokPermissionMode != "" {
+		valid := false
+		for _, mode := range ValidGrokPermissionModes {
+			if r.GrokPermissionMode == mode {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("invalid grok_permission_mode %q; valid values: %s",
+				r.GrokPermissionMode, strings.Join(ValidGrokPermissionModes, ", "))
 		}
 	}
 	if r.CodexSandboxMode != "" {
