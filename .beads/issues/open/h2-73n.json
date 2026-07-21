@@ -1,0 +1,39 @@
+{
+  "id": "h2-73n",
+  "title": "fork-session-and-agent-nav",
+  "description": "Add session fork (menu 'f' + h2 fork CLI): copy claude session log to new session id, clone RuntimeConfig with new agent name (parent-forkN), no pod inheritance, resume in new daemon, switch attached terminal over. Add agent navigator (menu 'a'): full-screen list of running agents with arrow navigation, Enter switches the current terminal to that agent via a new daemon-\u003eclient switch control frame; h2 attach becomes a reconnect loop.",
+  "status": "in_progress",
+  "priority": 2,
+  "type": "task",
+  "created_by": "fond-birch",
+  "owner": "danny@zocomputer.com",
+  "assignee": "dcosson-claude",
+  "comments": [
+    {
+      "id": 1,
+      "author": "fond-birch",
+      "text": "Initial implementation done: session fork (menu f + h2 session fork CLI), agent navigator (menu a), daemon-\u003eclient switch control frame with reconnect loop in doAttach. Unit tests in internal/session/fork_test.go, internal/cmd/fork_test.go, internal/session/client/menu_test.go. make check + full test suite pass. Awaiting review / user QA of live switching flow.",
+      "created_at": "2026-07-01T15:11:46.79237-07:00"
+    },
+    {
+      "id": 2,
+      "author": "fond-birch",
+      "text": "Follow-up per user feedback: navigator now lists stopped sessions (from session dirs) as 'Stopped' at the end instead of 'not responding'; Enter on a stopped session resumes it via shared session.ResumeSession (extracted from runResume) then switches; live list grouped by pod like h2 list (pods first, PodIndex order) with lone agents sorted by recent activity; attach client falls back to previous agent if a switch target is unreachable.",
+      "created_at": "2026-07-01T15:25:41.587435-07:00"
+    },
+    {
+      "id": 3,
+      "author": "fond-birch",
+      "text": "User confirmed: no age cutoff for the navigator's stopped section — it intentionally shows all stopped sessions (more inclusive than h2 list's default), with h2 session cleanup as the pruning mechanism. Feature complete on branch feature/fork-session-and-agent-nav; pending live QA of fork/switch/resume flows before merge.",
+      "created_at": "2026-07-01T15:29:22.394801-07:00"
+    },
+    {
+      "id": 4,
+      "author": "fond-birch",
+      "text": "More follow-ups: (1) menu fork no longer switches the terminal — fork starts in the background and the status bar flashes 'Forked to \u003cname\u003e' which clears on next keystroke or after 5s (MaybeClearFlash skips ESC-prefixed chunks so mouse motion doesn't wipe it); (2) added h2 run [name] --fork-from \u003cagent\u003e, sharing runFork/ForkSessionFiles with h2 session fork; ForkSessionFiles now takes an optional explicit fork name.",
+      "created_at": "2026-07-02T10:40:22.937061-07:00"
+    }
+  ],
+  "created_at": "2026-07-01T15:00:57.137625-07:00",
+  "updated_at": "2026-07-02T10:40:22.937155-07:00"
+}

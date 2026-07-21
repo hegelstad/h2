@@ -152,6 +152,18 @@ func (h *EventHandler) processLogRecord(eventName string, lr otelLogRecord, ts t
 			})
 			return true, fmt.Sprintf("server_error status=%s error=%q", statusCode, errMsg)
 		}
+		// Connection-level failures carry no HTTP status code, so they fall
+		// through the status branches above. Treat them like a server error so
+		// the agent leaves its prior Active sub-state instead of appearing stuck.
+		if isNetworkErrorMessage(errMsg) {
+			h.emitStateChange(ts, monitor.StateIdle, monitor.SubStateServerError)
+			h.emit(monitor.AgentEvent{
+				Type:      monitor.EventServerErrorInfo,
+				Timestamp: ts,
+				Data:      monitor.ServerErrorData{StatusCode: statusCode, Message: errMsg},
+			})
+			return true, fmt.Sprintf("network_error status=%s error=%q", statusCode, errMsg)
+		}
 		return false, fmt.Sprintf("api_error status=%s", statusCode)
 
 	case "tool_result":
@@ -463,19 +475,27 @@ func isUsageLimitMessage(content string) bool {
 	}
 	return strings.Contains(lower, "usage_limit_reached") ||
 		strings.Contains(lower, "usage limit reached") ||
+		strings.Contains(lower, "session limit reached") ||
 		strings.Contains(lower, "you've hit your usage limit") ||
+		strings.Contains(lower, "you've hit your session limit") ||
 		strings.Contains(lower, "you've hit your org's monthly usage limit") ||
 		strings.Contains(lower, "you've hit your limit")
 }
 
-// isServerErrorMessage returns true if the message content indicates an
-// API server error (5xx). Matches patterns like "Internal server error",
-// "API Error: 500", or the Anthropic error type "api_error".
-func isServerErrorMessage(content string) bool {
+// isNetworkErrorMessage returns true when the content indicates a
+// network/connection-level failure reaching the API — i.e. no HTTP response
+// was received, so there is no status code to key on. Claude Code surfaces
+// these as synthetic api-error messages such as
+// "API Error: Unable to connect to API (ConnectionRefused)" (also
+// FailedToOpenSocket, generic "Connection error."). These are transient and,
+// like server errors, auto-clear on the next successful turn.
+func isNetworkErrorMessage(content string) bool {
 	lower := strings.ToLower(content)
-	return strings.Contains(lower, "internal server error") ||
-		strings.Contains(lower, "\"type\":\"api_error\"") ||
-		strings.Contains(lower, "api error: 5")
+	return strings.Contains(lower, "unable to connect to api") ||
+		strings.Contains(lower, "connectionrefused") ||
+		strings.Contains(lower, "failedtoopensocket") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "connection error")
 }
 
 // resetsPattern matches Claude Code's synthetic rate limit message format:
@@ -543,14 +563,32 @@ func parseSessionLine(line []byte) ([]monitor.AgentEvent, bool) {
 		})
 	}
 
-	// Check for server error messages (5xx). An API error message that isn't
-	// a rate limit or auth error is treated as a server error.
 	isRateLimit := entry.Error == "rate_limit" || isUsageLimit
-	if entry.IsApiErrorMessage && !isAuth && !isRateLimit && isServerErrorMessage(content) {
+
+	// Any synthetic api-error give-up message that isn't a usage limit or auth
+	// error means Claude Code exhausted its retries and ended the turn WITHOUT
+	// firing a Stop hook — so the agent would otherwise stay frozen in its prior
+	// Active sub-state. This covers 5xx server errors (e.g. "529 Overloaded"),
+	// connection failures ("Unable to connect to API (ConnectionRefused)"), and
+	// any other API error code. Drive the agent to idle directly; the
+	// server_error sub-state auto-clears on the next successful turn. We must not
+	// rely on the OTEL api_error path alone, since it does not reliably observe
+	// every failure (connection-level errors carry no status code, and the final
+	// post-retry give-up is only recorded in the session JSONL).
+	if entry.IsApiErrorMessage && !isAuth && !isRateLimit {
+		statusCode := ""
+		if entry.ApiErrorStatus != 0 {
+			statusCode = strconv.Itoa(entry.ApiErrorStatus)
+		}
+		events = append(events, monitor.AgentEvent{
+			Type:      monitor.EventStateChange,
+			Timestamp: now,
+			Data:      monitor.StateChangeData{State: monitor.StateIdle, SubState: monitor.SubStateServerError},
+		})
 		events = append(events, monitor.AgentEvent{
 			Type:      monitor.EventServerErrorInfo,
 			Timestamp: now,
-			Data:      monitor.ServerErrorData{Message: content},
+			Data:      monitor.ServerErrorData{StatusCode: statusCode, Message: content},
 		})
 	}
 

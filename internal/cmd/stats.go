@@ -226,6 +226,8 @@ func deriveHarnessFromCommand(command string) string {
 		return "claude_code"
 	case "codex":
 		return "codex"
+	case "grok":
+		return "grok"
 	default:
 		return "generic"
 	}

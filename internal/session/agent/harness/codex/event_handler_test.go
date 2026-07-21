@@ -977,6 +977,7 @@ func TestIsUsageLimitError(t *testing.T) {
 		want bool
 	}{
 		{"You've hit your usage limit.", true},
+		{"You've hit your session limit · resets 6pm (America/Los_Angeles)", true},
 		{"usage_limit_reached", true},
 		{"rate_limit_exceeded", false},
 		{"something else", false},

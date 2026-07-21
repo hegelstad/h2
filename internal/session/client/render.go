@@ -30,7 +30,9 @@ func (c *Client) RenderScreen() {
 	var buf bytes.Buffer
 	buf.WriteString("\033[?2026h") // begin synchronized update
 	buf.WriteString("\0337")       // DECSC: save cursor position
-	if c.IsScrollMode() {
+	if c.Mode == ModeAgentNav {
+		c.renderAgentNavView(&buf)
+	} else if c.IsScrollMode() {
 		c.renderScrollView(&buf)
 	} else {
 		c.renderLiveView(&buf)
@@ -107,6 +109,190 @@ func (c *Client) renderScrollView(buf *bytes.Buffer) {
 		buf.WriteString("\033[0m\033[K")
 	}
 	c.renderScrollIndicator(buf)
+}
+
+// navRow is one display row of the agent navigator: either a section header
+// or a selectable entry (an index into NavEntries).
+type navRow struct {
+	header   string
+	entryIdx int // -1 for header rows
+}
+
+// buildNavRows converts NavEntries into display rows, inserting section
+// headers mirroring `h2 list`: one per pod, one for podless live agents, and
+// one for stopped sessions. Flat lists (no pods, nothing stopped) get no
+// headers at all.
+func (c *Client) buildNavRows() []navRow {
+	hasPods := false
+	hasStopped := false
+	for _, e := range c.NavEntries {
+		if e.Pod != "" && !e.Stopped {
+			hasPods = true
+		}
+		if e.Stopped {
+			hasStopped = true
+		}
+	}
+
+	var rows []navRow
+	prevHeader := ""
+	for i, e := range c.NavEntries {
+		var header string
+		switch {
+		case e.Stopped:
+			if hasStopped {
+				header = "Stopped"
+			}
+		case e.Pod != "":
+			header = "pod: " + e.Pod
+		default:
+			if hasPods {
+				header = "no pod"
+			}
+		}
+		if header != "" && header != prevHeader {
+			rows = append(rows, navRow{header: header, entryIdx: -1})
+		}
+		prevHeader = header
+		rows = append(rows, navRow{entryIdx: i})
+	}
+	return rows
+}
+
+// renderAgentNavView renders the agent navigator: a full-screen list of
+// agents (live first, grouped by pod; stopped sessions last) with the
+// current selection highlighted. Long lists scroll to keep the selection
+// visible.
+func (c *Client) renderAgentNavView(buf *bytes.Buffer) {
+	rows := c.VT.ChildRows
+	if rows < 1 {
+		return
+	}
+	title := " Agents — Up/Down move · Enter switch/resume · r refresh · Esc back "
+	if len(title) > c.VT.Cols && c.VT.Cols > 0 {
+		title = title[:c.VT.Cols]
+	}
+	fmt.Fprintf(buf, "\033[1;1H\033[1m%s\033[0m\033[K", title)
+
+	listRows := rows - 1
+	line := 2
+	writeLine := func(s string) {
+		if line > rows {
+			return
+		}
+		fmt.Fprintf(buf, "\033[%d;1H%s\033[0m\033[K", line, s)
+		line++
+	}
+
+	switch {
+	case c.NavLoading:
+		writeLine("  Loading agents...")
+	case len(c.NavEntries) == 0:
+		writeLine("  No agents found.")
+	default:
+		navRows := c.buildNavRows()
+
+		// Window the display rows so the selected entry stays visible.
+		selRow := 0
+		for i, r := range navRows {
+			if r.entryIdx == c.NavSelected {
+				selRow = i
+				break
+			}
+		}
+		first := 0
+		if listRows > 0 && selRow >= listRows {
+			first = selRow - listRows + 1
+		}
+
+		nameWidth := 0
+		for _, e := range c.NavEntries {
+			if len(e.Name) > nameWidth {
+				nameWidth = len(e.Name)
+			}
+		}
+		if nameWidth > 32 {
+			nameWidth = 32
+		}
+		for i := first; i < len(navRows) && line <= rows; i++ {
+			r := navRows[i]
+			if r.entryIdx == -1 {
+				writeLine("\033[1m" + r.header)
+				continue
+			}
+			writeLine(c.formatNavRow(c.NavEntries[r.entryIdx], r.entryIdx == c.NavSelected, nameWidth))
+		}
+	}
+	// Blank out any remaining rows so stale terminal content doesn't show.
+	for line <= rows {
+		writeLine("")
+	}
+}
+
+// formatNavRow formats one agent navigator row, truncated to the terminal width.
+func (c *Client) formatNavRow(e AgentNavEntry, selected bool, nameWidth int) string {
+	name := e.Name
+	if len(name) > nameWidth {
+		name = name[:nameWidth]
+	}
+
+	state := e.StateDisplay
+	if e.StateDuration != "" {
+		state += " " + e.StateDuration
+	}
+
+	var extras strings.Builder
+	if e.IsSelf {
+		extras.WriteString(" (this)")
+	}
+	if e.Role != "" {
+		fmt.Fprintf(&extras, " (%s)", e.Role)
+	}
+	// Live entries with a pod sit under a pod header; only stopped entries
+	// need the pod spelled out on the row.
+	if e.Pod != "" && e.Stopped {
+		fmt.Fprintf(&extras, " [pod: %s]", e.Pod)
+	}
+	if e.Command != "" {
+		extras.WriteString(" " + e.Command)
+	}
+
+	marker := "  "
+	if selected {
+		marker = "> "
+	}
+	text := fmt.Sprintf("%s%-*s  %-18s%s", marker, nameWidth, name, state, extras.String())
+	if len(text) > c.VT.Cols && c.VT.Cols > 0 {
+		text = text[:c.VT.Cols]
+	}
+	if selected {
+		return "\033[7m" + text
+	}
+
+	// Color the state dot-equivalent by coloring the state text.
+	stateColor := ""
+	switch e.State {
+	case "active":
+		stateColor = "\033[32m"
+	case "idle":
+		stateColor = "\033[33m"
+	case "exited":
+		stateColor = "\033[31m"
+	case "stopped":
+		stateColor = "\033[90m"
+	}
+	if stateColor == "" || state == "" {
+		return text
+	}
+	// Re-render with the state segment colored (positions match the plain
+	// version because escape codes add no visible width, but truncation above
+	// must happen on the plain text first — so splice the color in afterwards.
+	idx := strings.Index(text, state)
+	if idx < 0 {
+		return text
+	}
+	end := idx + len(state)
+	return text[:idx] + stateColor + text[idx:end] + "\033[0m" + text[end:]
 }
 
 // renderScrollViewHistory renders using ScrollHistory (scrolled-off lines from
@@ -427,7 +613,7 @@ func (c *Client) RenderStatusBar() {
 	// --- Separator line ---
 	fmt.Fprintf(&buf, "\033[%d;1H\033[2K", sepRow)
 
-	var style, label string
+	var style, label, right string
 	if c.VT.ChildExited {
 		style = "\033[7m\033[31m" // red inverse
 		if c.IsScrollMode() {
@@ -435,56 +621,18 @@ func (c *Client) RenderStatusBar() {
 		} else {
 			label = " " + c.exitMessage() + " | [Enter] relaunch \u00b7 [q] quit"
 		}
-	} else {
-		style = c.ModeBarStyle()
-		help := c.HelpLabel()
-		label = " " + c.ModeStatusLabel()
-
-		if c.Mode != ModeMenu {
-			status := c.StatusLabel()
-			label += " | " + status
-			if c.WorkingDir != nil {
-				if wd := strings.TrimSpace(c.WorkingDir()); wd != "" {
-					label += " | " + c.formatWorkingDirForBar(wd)
-				}
-			}
-
-			// OTEL metrics (tokens and cost)
-			if c.OtelMetrics != nil {
-				inTok, outTok, cost, connected, port := c.OtelMetrics()
-				if connected {
-					label += " | " + monitor.FormatTokens(inTok) + "/" + monitor.FormatTokens(outTok) + " " + monitor.FormatCost(cost)
-				} else {
-					label += fmt.Sprintf(" | [otel:%d]", port)
-				}
-			}
-
-		}
-
-		if help != "" {
-			label += " | " + help
-		}
-	}
-
-	right := ""
-	if c.AgentName != "" {
-		right = c.AgentName + " "
-	}
-
-	if len(label)+len(right) > c.VT.Cols {
-		if !c.VT.ChildExited {
-			// Tight on space - drop help first, then right-align.
-			label = " " + c.ModeStatusLabel()
-			if c.Mode != ModeMenu {
-				label += " | " + c.StatusLabel()
-			}
+		if c.AgentName != "" {
+			right = c.AgentName + " "
 		}
 		if len(label)+len(right) > c.VT.Cols {
+			right = ""
 			if len(label) > c.VT.Cols {
 				label = label[:c.VT.Cols]
 			}
-			right = ""
 		}
+	} else {
+		style = c.ModeBarStyle()
+		label, right = c.fitStatusBarSections()
 	}
 
 	buf.WriteString(style)
@@ -501,6 +649,76 @@ func (c *Client) RenderStatusBar() {
 	c.OutputMu.Lock()
 	c.Output.Write(buf.Bytes())
 	c.OutputMu.Unlock()
+}
+
+// fitStatusBarSections assembles the left status-bar label and the
+// right-aligned agent name, dropping sections one at a time when the bar
+// is too narrow. Drop order: tokens, help, mode, agent name, working dir.
+// The activity status is kept until nothing else fits, then hard-truncated
+// as a last resort.
+func (c *Client) fitStatusBarSections() (label, right string) {
+	if c.AgentName != "" {
+		right = c.AgentName + " "
+	}
+
+	mode := c.ModeStatusLabel()
+	var status, wd, tokens string
+	if c.Mode != ModeMenu {
+		status = c.StatusLabel()
+		if c.FlashText != "" {
+			status = c.FlashText
+		}
+		if c.WorkingDir != nil {
+			if w := strings.TrimSpace(c.WorkingDir()); w != "" {
+				wd = c.formatWorkingDirForBar(w)
+			}
+		}
+		// OTEL metrics (tokens and cost)
+		if c.OtelMetrics != nil {
+			inTok, outTok, cost, connected, port := c.OtelMetrics()
+			if connected {
+				tokens = monitor.FormatTokens(inTok) + "/" + monitor.FormatTokens(outTok) + " " + monitor.FormatCost(cost)
+			} else {
+				tokens = fmt.Sprintf("[otel:%d]", port)
+			}
+		}
+	}
+	help := c.HelpLabel()
+
+	join := func() string {
+		var b strings.Builder
+		for _, part := range []string{mode, status, wd, tokens, help} {
+			if part == "" {
+				continue
+			}
+			if b.Len() == 0 {
+				b.WriteString(" ")
+			} else {
+				b.WriteString(" | ")
+			}
+			b.WriteString(part)
+		}
+		return b.String()
+	}
+
+	drops := []*string{&tokens, &help, &mode, &right, &wd}
+	if c.Mode == ModeMenu {
+		// The menu items are the whole bar — keep them and drop help,
+		// then the agent name.
+		drops = []*string{&help, &right}
+	}
+	label = join()
+	for _, drop := range drops {
+		if len(label)+len(right) <= c.VT.Cols {
+			return label, right
+		}
+		*drop = ""
+		label = join()
+	}
+	if len(label) > c.VT.Cols {
+		label = label[:c.VT.Cols]
+	}
+	return label, right
 }
 
 // RenderInputBar draws the input prompt, text, cursor, and debug line.
@@ -610,6 +828,8 @@ func (c *Client) ModeLabel() string {
 		return "Passthrough"
 	case ModeMenu:
 		return c.MenuLabel()
+	case ModeAgentNav:
+		return "Agents"
 	case ModeScroll:
 		return "Scroll"
 	case ModePassthroughScroll:
@@ -637,7 +857,7 @@ func (c *Client) ModeBarStyle() string {
 	switch c.Mode {
 	case ModePassthrough, ModePassthroughScroll:
 		return "\033[7m\033[33m"
-	case ModeMenu:
+	case ModeMenu, ModeAgentNav:
 		return "\033[7m\033[34m"
 	case ModeScroll:
 		return "\033[7m\033[36m"
@@ -653,6 +873,8 @@ func (c *Client) HelpLabel() string {
 		return c.keybindingHelp().PassthroughMode
 	case ModeMenu:
 		return `Ctrl+\ back | Up/Down history`
+	case ModeAgentNav:
+		return "Up/Down move | Enter switch | Esc back"
 	case ModeScroll, ModePassthroughScroll:
 		return "Scroll/Up/Down navigate | Esc exit scroll"
 	default:
@@ -752,6 +974,12 @@ func (c *Client) MenuLabel() string {
 		items = "Menu | p:LOCKED | t:take over | c:clear | r:redraw"
 	} else {
 		items = "Menu | p:passthrough | c:clear | r:redraw"
+	}
+	if c.OnForkSession != nil {
+		items += " | f:fork"
+	}
+	if c.OnRequestAgentList != nil {
+		items += " | a:agents"
 	}
 	if c.OnDetach != nil {
 		items += " | d:detach"

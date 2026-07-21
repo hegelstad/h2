@@ -15,6 +15,7 @@ import (
 	"h2/internal/session/agent/harness"
 	"h2/internal/session/agent/monitor"
 	"h2/internal/session/agent/shared/otelserver"
+	"h2/internal/session/agent/shared/sessionlogcollector"
 )
 
 func init() {
@@ -38,6 +39,12 @@ type CodexHarness struct {
 	// internalCh buffers events from the OTEL parser callbacks.
 	// Start() forwards these to the external events channel.
 	internalCh chan monitor.AgentEvent
+
+	// sessionLogPathCh delivers the native rollout log path to the tailer once
+	// it is discovered (async, when conversation.id arrives). Buffered so the
+	// discovery callback never blocks and the path survives if it fires before
+	// Start()'s tailer goroutine is waiting.
+	sessionLogPathCh chan string
 }
 
 // New creates a CodexHarness.
@@ -47,10 +54,11 @@ func New(rc *config.RuntimeConfig, log *activitylog.Logger) *CodexHarness {
 	}
 	ch := make(chan monitor.AgentEvent, 256)
 	return &CodexHarness{
-		rc:           rc,
-		activityLog:  log,
-		internalCh:   ch,
-		eventHandler: NewEventHandler(ch),
+		rc:               rc,
+		activityLog:      log,
+		internalCh:       ch,
+		eventHandler:     NewEventHandler(ch),
+		sessionLogPathCh: make(chan string, 1),
 	}
 }
 
@@ -160,6 +168,11 @@ func (h *CodexHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, erro
 			return
 		}
 		h.rc.NativeLogPathSuffix = rel
+		// Hand the full rollout path to the tailer (non-blocking; first wins).
+		select {
+		case h.sessionLogPathCh <- matches[0]:
+		default:
+		}
 	})
 
 	s, err := otelserver.New(otelserver.Callbacks{
@@ -184,6 +197,11 @@ func (h *CodexHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, erro
 // Start forwards internal events to the external channel and blocks
 // until ctx is cancelled.
 func (h *CodexHarness) Start(ctx context.Context, events chan<- monitor.AgentEvent) error {
+	// Tail the native rollout log for full assistant message text. Unlike
+	// Claude, Codex's log path is only known once the conversation starts, so
+	// the tailer waits for the discovery callback to deliver the path.
+	go h.tailSessionLog(ctx)
+
 	for {
 		select {
 		case ev := <-h.internalCh:
@@ -196,6 +214,27 @@ func (h *CodexHarness) Start(ctx context.Context, events chan<- monitor.AgentEve
 			return nil
 		}
 	}
+}
+
+// tailSessionLog waits for the native rollout log path to be discovered, then
+// tails it, emitting an EventAgentMessage for each assistant message. On resume
+// it skips existing content so the prior conversation isn't replayed as new
+// activity.
+func (h *CodexHarness) tailSessionLog(ctx context.Context) {
+	var path string
+	select {
+	case path = <-h.sessionLogPathCh:
+	case <-ctx.Done():
+		return
+	}
+	if path == "" {
+		return
+	}
+	if h.rc.ResumeSessionID != "" {
+		sessionlogcollector.NewTailOnly(path, h.eventHandler.OnSessionLogLine).Run(ctx)
+		return
+	}
+	sessionlogcollector.New(path, h.eventHandler.OnSessionLogLine).Run(ctx)
 }
 
 // HandleHookEvent returns false — Codex doesn't use h2 hooks.

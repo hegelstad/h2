@@ -103,17 +103,15 @@ func TestStateTransitions_Exited(t *testing.T) {
 
 	startAgent(t, s)
 
+	// SignalExit wires through to monitor.SetExited; we should reach the
+	// Exited state at least briefly. (A subsequent harness event may
+	// recover us — see TestExitedSelfRecovery in the monitor package.)
 	s.SignalExit()
-	time.Sleep(50 * time.Millisecond)
-	if got, _ := s.State(); got != monitor.StateExited {
-		t.Fatalf("expected StateExited, got %v", got)
-	}
-
-	// Output after exit should NOT change state back — exited is sticky.
-	s.HandleOutput()
-	time.Sleep(50 * time.Millisecond)
-	if got, _ := s.State(); got != monitor.StateExited {
-		t.Fatalf("expected StateExited to be sticky after output, got %v", got)
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if !s.WaitForState(ctx, monitor.StateExited) {
+		got, _ := s.State()
+		t.Fatalf("expected to reach StateExited after SignalExit, got %v", got)
 	}
 }
 

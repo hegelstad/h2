@@ -224,14 +224,6 @@ func TestResetForRelaunch(t *testing.T) {
 		t.Fatalf("expected StateExited, got %v", state)
 	}
 
-	// State changes should be ignored while exited.
-	m.Events() <- AgentEvent{Type: EventStateChange, Data: StateChangeData{State: StateActive, SubState: SubStateToolUse}}
-	time.Sleep(20 * time.Millisecond)
-	state, _ = m.State()
-	if state != StateExited {
-		t.Fatalf("expected StateExited to be sticky, got %v", state)
-	}
-
 	// Reset for relaunch.
 	m.ResetForRelaunch()
 	state, sub := m.State()
@@ -251,6 +243,80 @@ func TestResetForRelaunch(t *testing.T) {
 	}
 	if sub != SubStateThinking {
 		t.Fatalf("expected SubStateThinking after reset+event, got %v", sub)
+	}
+}
+
+// TestExitedSelfRecovery covers the backstop: if more events arrive after
+// the monitor was marked Exited (e.g. by Claude's SessionEnd hook firing on
+// /clear or session rotation), the next non-terminal event un-sticks the
+// state so subsequent activity drives Active/Idle normally.
+func TestExitedSelfRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		ev   AgentEvent
+		want State
+	}{
+		{
+			name: "StateChange",
+			ev:   AgentEvent{Type: EventStateChange, Data: StateChangeData{State: StateActive, SubState: SubStateThinking}},
+			want: StateActive,
+		},
+		{
+			name: "TurnCompleted",
+			ev:   AgentEvent{Type: EventTurnCompleted, Data: TurnCompletedData{}},
+			want: StateInitialized,
+		},
+		{
+			name: "UserPrompt",
+			ev:   AgentEvent{Type: EventUserPrompt},
+			want: StateInitialized,
+		},
+		{
+			name: "ToolStarted",
+			ev:   AgentEvent{Type: EventToolStarted, Data: ToolStartedData{ToolName: "Bash"}},
+			want: StateInitialized,
+		},
+		{
+			name: "SessionStarted",
+			ev:   AgentEvent{Type: EventSessionStarted, Data: SessionStartedData{SessionID: "s1", Model: "m"}},
+			want: StateInitialized,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go m.Run(ctx)
+
+			m.SetExited()
+			if state, _ := m.State(); state != StateExited {
+				t.Fatalf("setup: expected StateExited, got %v", state)
+			}
+
+			m.Events() <- tc.ev
+			time.Sleep(20 * time.Millisecond)
+			if state, _ := m.State(); state != tc.want {
+				t.Fatalf("after %s while Exited: state = %v, want %v", tc.name, state, tc.want)
+			}
+		})
+	}
+}
+
+// TestExitedStickyForSessionEnded confirms a real EventSessionEnded keeps
+// us in Exited (the recovery backstop only fires for non-terminal events).
+func TestExitedStickyForSessionEnded(t *testing.T) {
+	m := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go m.Run(ctx)
+
+	m.SetExited()
+	m.Events() <- AgentEvent{Type: EventSessionEnded}
+	time.Sleep(20 * time.Millisecond)
+	if state, _ := m.State(); state != StateExited {
+		t.Fatalf("expected StateExited after SessionEnded, got %v", state)
 	}
 }
 

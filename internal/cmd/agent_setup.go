@@ -33,6 +33,8 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetClaudeConfigPathPrefix()
 	case "codex":
 		harnessConfigPathPrefix = role.GetCodexConfigPathPrefix()
+	case "grok":
+		harnessConfigPathPrefix = role.GetGrokConfigPathPrefix()
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,
@@ -56,6 +58,9 @@ func buildCommandRuntimeConfig(command string) *config.RuntimeConfig {
 	case "codex":
 		ht = "codex"
 		configPrefix = filepath.Join(config.ConfigDir(), "codex-config")
+	case "grok":
+		ht = "grok"
+		configPrefix = filepath.Join(config.ConfigDir(), "grok-config")
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,
@@ -78,10 +83,24 @@ func setupAndForkAgent(name string, role *config.Role, detach bool, pod string, 
 	return doSetupAndForkAgent(name, role, detach, pod, podIndex, overrides, false)
 }
 
+// emitRoleWarnings prints a role's non-fatal config advisories to stderr (e.g. a codex
+// role that sets claude-only fields). Warnings never block a launch; they just flag
+// likely mistakes. Printed even for quiet/pod launches — they only appear when the role
+// is actually misconfigured.
+func emitRoleWarnings(role *config.Role) {
+	if role == nil {
+		return
+	}
+	for _, w := range role.Warnings() {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+}
+
 func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string, podIndex int, overrides []string, quiet bool) error {
 	if name == "" {
 		name = session.GenerateName()
 	}
+	emitRoleWarnings(role)
 	if err := ensureAgentSocketAvailable(name); err != nil {
 		return err
 	}
@@ -178,6 +197,7 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 		ClaudePermissionMode: role.ClaudePermissionMode,
 		CodexSandboxMode:     role.CodexSandboxMode,
 		CodexAskForApproval:  role.CodexAskForApproval,
+		GrokPermissionMode:   role.GrokPermissionMode,
 		PermissionReview:     role.PermissionReview,
 		AdditionalDirs:       additionalDirs,
 		Overrides:            overrideMap,
