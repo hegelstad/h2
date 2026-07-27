@@ -58,6 +58,10 @@ type TerminalHints struct {
 // used by the launcher (not reconstructed from agent name) to ensure
 // consistency across symlinks, worktrees, and custom paths.
 func RunDaemon(sessionDir string, rc *config.RuntimeConfig, resume bool) error {
+	// Drop any harness session markers we inherited from whatever launched
+	// this daemon before the agent process is spawned from this environment.
+	sanitizeInheritedEnv()
+
 	if resume {
 		rc.ResumeSessionID = rc.HarnessSessionID
 	}
@@ -435,9 +439,9 @@ func ForkDaemon(sessionDir string, termHints TerminalHints, resume bool) error {
 	cmd.SysProcAttr = NewSysProcAttr()
 
 	// Explicitly build environment: inherit parent env + additions.
-	// Filter CLAUDECODE to prevent "nested session" errors when an agent
-	// (running inside Claude Code) spawns another agent.
-	env := filteredEnv(os.Environ(), "CLAUDECODE")
+	// Filter the harness's own session markers so they never leak into the
+	// agents we spawn (see inheritedHarnessSessionVars).
+	env := filteredEnv(os.Environ(), inheritedHarnessSessionVars...)
 	if h2Dir, err := config.ResolveDir(); err == nil {
 		env = append(env, "H2_DIR="+h2Dir)
 	}
@@ -522,6 +526,36 @@ func ForkDaemon(sessionDir string, termHints TerminalHints, resume bool) error {
 	}
 
 	return fmt.Errorf("daemon did not start (socket %s not found)", sockPath)
+}
+
+// inheritedHarnessSessionVars are variables an agent harness CLI sets to
+// describe its own process. When h2 is launched from inside such a session
+// (e.g. someone starts the daemon from a Claude Code shell) they are inherited
+// by every agent we spawn, where they are wrong at best:
+// CLAUDE_CODE_CHILD_SESSION makes the agent believe it is a nested session and
+// silently disables transcript saving, CLAUDECODE triggers nested-session
+// errors, and the session/PID/exec vars point at a process that is long gone.
+// They are stripped when forking a daemon and from the daemon's own process
+// environment, so a daemon that was forked by an older binary heals on restart.
+var inheritedHarnessSessionVars = []string{
+	"CLAUDECODE",
+	"CLAUDE_CODE_CHILD_SESSION",
+	"CLAUDE_CODE_SESSION_ID",
+	"CLAUDE_CODE_ENTRYPOINT",
+	"CLAUDE_CODE_EXECPATH",
+	"CLAUDE_PID",
+}
+
+// sanitizeInheritedEnv removes inheritedHarnessSessionVars from this process's
+// environment. The daemon spawns the agent through a PTY that inherits
+// os.Environ(), so clearing them here covers every child regardless of how the
+// daemon itself was started.
+func sanitizeInheritedEnv() {
+	for _, key := range inheritedHarnessSessionVars {
+		if _, ok := os.LookupEnv(key); ok {
+			os.Unsetenv(key)
+		}
+	}
 }
 
 // filteredEnv returns a copy of env with entries matching any of the given
