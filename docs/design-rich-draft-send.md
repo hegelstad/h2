@@ -285,7 +285,7 @@ cmd/send  --(stream)-->  bridgeservice  --Open/Write/Close-->  telegram
 
 Trigger fallback when **any** of these happen:
 
-- Genuine HTTP/API error from draft, persist, or edit
+- Genuine HTTP/API error from draft or persist
 - `Render` error (over limit, internal)
 - Malformed markup rejected by the API
 
