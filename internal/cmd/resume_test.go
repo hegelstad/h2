@@ -325,6 +325,9 @@ func setupFakeHomeForResume(t *testing.T) {
 	t.Setenv("H2_DIR", h2dir)
 	config.ResetResolveCache()
 	t.Cleanup(config.ResetResolveCache)
+	if err := config.CheckTestIsolation(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestRunResumeFromSessionID_NotFound(t *testing.T) {
