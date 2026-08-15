@@ -507,11 +507,60 @@ func TestDraftIDSkipsZero(t *testing.T) {
 	tg := &Telegram{}
 	tg.draftSeq.Store(-1) // next Add(1) == 0, must skip
 	id := tg.nextDraftID()
-	if id == 0 {
-		t.Fatal("draft_id was 0")
+	if id == 0 || id == thinkingDraftID {
+		t.Fatalf("draft_id = %d, reserved", id)
 	}
 	id2 := tg.nextDraftID()
-	if id2 == 0 || id2 == id {
+	if id2 == 0 || id2 == thinkingDraftID || id2 == id {
 		t.Fatalf("id2 = %d after %d", id2, id)
+	}
+}
+
+func TestShowThinking_SendsDraft(t *testing.T) {
+	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		return apiResponse{OK: true}
+	})
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, chatType: "private"}
+	if err := tg.ShowThinking(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var drafts int
+	for _, c := range *calls {
+		if !strings.HasSuffix(c.Path, "sendRichMessageDraft") {
+			continue
+		}
+		drafts++
+		if c.Body["draft_id"] != float64(thinkingDraftID) {
+			t.Fatalf("draft_id = %v, want %d", c.Body["draft_id"], thinkingDraftID)
+		}
+		rm := c.Body["rich_message"].(map[string]any)
+		if rm["html"] != "<tg-thinking>Thinking...</tg-thinking>" {
+			t.Fatalf("html = %v", rm["html"])
+		}
+	}
+	if drafts != 1 {
+		t.Fatalf("drafts = %d, want 1", drafts)
+	}
+}
+
+func TestShowThinking_NonPrivateFallsBackToTyping(t *testing.T) {
+	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		if strings.HasSuffix(path, "sendRichMessageDraft") {
+			t.Error("must not draft thinking in a non-private chat")
+		}
+		return apiResponse{OK: true}
+	})
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, chatType: "supergroup"}
+	if err := tg.ShowThinking(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var typing int
+	for _, c := range *calls {
+		if strings.HasSuffix(c.Path, "sendChatAction") {
+			typing++
+		}
+	}
+	if typing != 1 {
+		t.Fatalf("typing = %d, want 1", typing)
 	}
 }

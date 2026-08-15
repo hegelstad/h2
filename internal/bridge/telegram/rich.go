@@ -27,6 +27,10 @@ const (
 
 	// botAPITimeout bounds every Bot API call except getUpdates (long poll).
 	botAPITimeout = 30 * time.Second
+
+	// thinkingDraftID is reserved for the agent-active "Thinking..." preview.
+	// Stream draft ids skip this value.
+	thinkingDraftID int64 = 1
 )
 
 // Send renders text as rich HTML and persists it with sendRichMessage.
@@ -82,10 +86,26 @@ func (t *Telegram) clk() clock {
 func (t *Telegram) nextDraftID() int64 {
 	for {
 		id := t.draftSeq.Add(1)
-		if id != 0 {
+		if id != 0 && id != thinkingDraftID {
 			return id
 		}
 	}
+}
+
+// ShowThinking posts an ephemeral Telegram rich draft with
+// <tg-thinking>Thinking...</tg-thinking>. Private chats only; otherwise
+// it falls back to the normal typing chat action. Same draft_id so
+// refreshes animate instead of stacking.
+func (t *Telegram) ShowThinking(ctx context.Context) error {
+	if !t.chatIsPrivate(ctx) {
+		return t.SendTyping(ctx)
+	}
+	html := "<tg-thinking>Thinking...</tg-thinking>"
+	if err := t.sendRichDraft(ctx, thinkingDraftID, html); err != nil {
+		log.Printf("telegram thinking draft: %v; falling back to typing", err)
+		return t.SendTyping(ctx)
+	}
+	return nil
 }
 
 type inputRichMessage struct {

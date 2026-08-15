@@ -632,6 +632,46 @@ func TestResolveDefaultTarget_NoAgents(t *testing.T) {
 
 // --- Typing loop tests ---
 
+type mockThinkingBridge struct {
+	mockTypingBridge
+	thinkCalls int
+}
+
+func (m *mockThinkingBridge) ShowThinking(_ context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.thinkCalls++
+	return nil
+}
+
+func (m *mockThinkingBridge) ThinkCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.thinkCalls
+}
+
+func TestTypingLoop_ThinkingPreviewWhenActive(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	_ = newMockStatusAgent(t, tmpDir, "concierge", "active")
+
+	tb := &mockThinkingBridge{mockTypingBridge: mockTypingBridge{name: "telegram"}}
+	svc := New([]bridge.Bridge{tb}, "alice", "concierge", "", tmpDir, nil)
+	svc.typingTickInterval = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go svc.runTypingLoop(ctx)
+
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+
+	if tb.ThinkCalls() < 2 {
+		t.Errorf("expected >= 2 thinking previews when active, got %d", tb.ThinkCalls())
+	}
+	if tb.TypingCalls() != 0 {
+		t.Errorf("ThinkingPreview should replace SendTyping, got %d typing calls", tb.TypingCalls())
+	}
+}
+
 func TestTypingLoop_SendsWhenActive(t *testing.T) {
 	tmpDir := shortTempDir(t)
 	_ = newMockStatusAgent(t, tmpDir, "concierge", "active")

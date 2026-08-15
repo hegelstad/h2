@@ -613,6 +613,12 @@ func (s *Service) runTypingLoop(ctx context.Context) {
 				continue
 			}
 			for _, b := range s.bridges {
+				if tp, ok := b.(bridge.ThinkingPreview); ok {
+					if err := tp.ShowThinking(ctx); err != nil {
+						log.Printf("bridge: thinking preview via %s: %v", b.Name(), err)
+					}
+					continue
+				}
 				if ti, ok := b.(bridge.TypingIndicator); ok {
 					if err := ti.SendTyping(ctx); err != nil {
 						log.Printf("bridge: typing indicator via %s: %v", b.Name(), err)

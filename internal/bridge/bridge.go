@@ -33,6 +33,13 @@ type TypingIndicator interface {
 	SendTyping(ctx context.Context) error
 }
 
+// ThinkingPreview is the capability for bridges that can show an ephemeral
+// "Thinking..." preview while the target agent is active (e.g. Telegram
+// sendRichMessageDraft + <tg-thinking>).
+type ThinkingPreview interface {
+	ShowThinking(ctx context.Context) error
+}
+
 var agentTagRe = regexp.MustCompile(`^\[([a-zA-Z0-9_-]+)\]\s*`)
 
 // ParseAgentTag extracts an "[agent-name]" tag from the start of text.
