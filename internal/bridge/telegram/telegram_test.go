@@ -13,14 +13,19 @@ import (
 )
 
 func TestSend(t *testing.T) {
-	var got sendRichRequest
+	var gotChat, gotText, gotMode string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/botTOKEN/sendRichMessage" {
+		if r.URL.Path != "/botTOKEN/sendMessage" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		json.NewDecoder(r.Body).Decode(&got)
-		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
+		_ = r.ParseForm()
+		gotChat = r.FormValue("chat_id")
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		var out sendMessageResponse
+		out.OK = true
+		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -34,14 +39,14 @@ func TestSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if got.ChatID != 42 {
-		t.Errorf("chat_id = %d, want 42", got.ChatID)
+	if gotChat != "42" {
+		t.Errorf("chat_id = %s, want 42", gotChat)
 	}
-	if got.RichMessage.HTML != "<p>hello from h2</p>" {
-		t.Errorf("html = %q", got.RichMessage.HTML)
+	if gotText != "hello from h2" {
+		t.Errorf("text = %q", gotText)
 	}
-	if !got.RichMessage.SkipEntityDetection {
-		t.Error("skip_entity_detection want true")
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
 	}
 }
 
@@ -50,15 +55,16 @@ func TestSend_ChunksLongMessage(t *testing.T) {
 	var sentTexts []string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/botTOKEN/sendRichMessage" {
+		if r.URL.Path != "/botTOKEN/sendMessage" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		var req sendRichRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = r.ParseForm()
 		mu.Lock()
-		sentTexts = append(sentTexts, req.RichMessage.HTML)
+		sentTexts = append(sentTexts, r.FormValue("text"))
 		mu.Unlock()
-		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
+		var out sendMessageResponse
+		out.OK = true
+		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -84,11 +90,11 @@ func TestSend_ChunksLongMessage(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if len(sentTexts) != 1 {
-		t.Fatalf("expected 1 rich persist (under 32768), got %d", len(sentTexts))
+	if len(sentTexts) < 2 {
+		t.Fatalf("expected sendMessage to split 8000-char body, got %d", len(sentTexts))
 	}
 	if !strings.Contains(sentTexts[0], "xxxx") {
-		t.Errorf("rich html missing body: %s", sentTexts[0][:min(80, len(sentTexts[0]))])
+		t.Errorf("first chunk missing body: %s", sentTexts[0][:min(80, len(sentTexts[0]))])
 	}
 }
 
@@ -426,19 +432,14 @@ func TestPoll_SlashCommand_Intercepted(t *testing.T) {
 			} else {
 				<-r.Context().Done()
 			}
-		case "/botTOKEN/sendRichMessage":
-			var req sendRichRequest
-			json.NewDecoder(r.Body).Decode(&req)
-			mu.Lock()
-			sentTexts = append(sentTexts, req.RichMessage.HTML)
-			mu.Unlock()
-			json.NewEncoder(w).Encode(sendRichResponse{OK: true})
 		case "/botTOKEN/sendMessage":
 			r.ParseForm()
 			mu.Lock()
 			sentTexts = append(sentTexts, r.FormValue("text"))
 			mu.Unlock()
-			json.NewEncoder(w).Encode(apiResponse{OK: true})
+			var out sendMessageResponse
+			out.OK = true
+			json.NewEncoder(w).Encode(out)
 		default:
 			http.NotFound(w, r)
 		}
@@ -490,7 +491,7 @@ func TestPoll_SlashCommand_Intercepted(t *testing.T) {
 	if sentTexts[0] == "" {
 		t.Error("sent text is empty")
 	}
-	want := "<p>[echo result]<br>hello</p>"
+	want := "[echo result]\nhello"
 	if sentTexts[0] != want {
 		t.Errorf("sent text = %q, want %q", sentTexts[0], want)
 	}

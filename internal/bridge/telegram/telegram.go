@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"h2/internal/bridge"
@@ -49,7 +47,6 @@ type Telegram struct {
 	offset int64
 
 	clock    clock
-	draftSeq atomic.Int64
 	streamMu sync.Mutex
 	chatType string
 
@@ -70,34 +67,6 @@ func (t *Telegram) apiURL(method string) string {
 		base = "https://api.telegram.org"
 	}
 	return fmt.Sprintf("%s/bot%s/%s", base, t.Token, method)
-}
-
-func (t *Telegram) sendChunk(ctx context.Context, text string) error {
-	ctx, cancel := withAPITimeout(ctx)
-	defer cancel()
-	form := url.Values{
-		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
-		"text":    {text},
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(form.Encode()))
-	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := t.sendHTTPClient().Do(req)
-	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result apiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("telegram send: decode response: %w", err)
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram send: API error: %s", result.Description)
-	}
-	return nil
 }
 
 // Start begins long-polling for incoming messages. It spawns a goroutine

@@ -35,7 +35,7 @@ type TypingIndicator interface {
 
 // ThinkingPreview is the capability for bridges that can show an ephemeral
 // "Thinking..." preview while the target agent is active (e.g. Telegram
-// sendRichMessageDraft + <tg-thinking>).
+// sendMessageDraft with empty text).
 type ThinkingPreview interface {
 	ShowThinking(ctx context.Context) error
 	StopThinking()

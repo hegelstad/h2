@@ -49,10 +49,33 @@ func recordAPI(t *testing.T, handler func(path string, body map[string]any) any)
 	return srv, &calls
 }
 
+func persistOK() sendMessageResponse {
+	var r sendMessageResponse
+	r.OK = true
+	r.Result.MessageID = 77
+	return r
+}
+
+func isDraft(c apiCall) bool {
+	return strings.HasSuffix(c.Path, "sendMessageDraft")
+}
+
+func isHTMLSend(c apiCall) bool {
+	return strings.HasSuffix(c.Path, "sendMessage") &&
+		!strings.HasSuffix(c.Path, "sendMessageDraft") &&
+		c.Form["parse_mode"] == "HTML"
+}
+
+func isPlainSend(c apiCall) bool {
+	return strings.HasSuffix(c.Path, "sendMessage") &&
+		!strings.HasSuffix(c.Path, "sendMessageDraft") &&
+		c.Form["parse_mode"] == ""
+}
+
 func TestSend_OneShotNeverDrafts(t *testing.T) {
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if path == "/botTOKEN/sendRichMessage" {
-			return sendRichResponse{OK: true}
+		if strings.HasSuffix(path, "sendMessage") && !strings.HasSuffix(path, "sendMessageDraft") {
+			return persistOK()
 		}
 		t.Errorf("unexpected path %s", path)
 		return apiResponse{OK: false, Description: "unexpected"}
@@ -64,24 +87,31 @@ func TestSend_OneShotNeverDrafts(t *testing.T) {
 	if len(*calls) != 1 {
 		t.Fatalf("calls = %d, want 1", len(*calls))
 	}
-	if (*calls)[0].Path != "/botTOKEN/sendRichMessage" {
-		t.Fatalf("path = %s", (*calls)[0].Path)
+	c := (*calls)[0]
+	if !isHTMLSend(c) {
+		t.Fatalf("call = %+v, want sendMessage parse_mode=HTML", c)
 	}
-	rm := (*calls)[0].Body["rich_message"].(map[string]any)
-	if rm["skip_entity_detection"] != true {
-		t.Fatalf("skip_entity_detection = %v", rm["skip_entity_detection"])
+	if c.Form["text"] != "hi" {
+		t.Fatalf("text = %q", c.Form["text"])
 	}
-	if rm["html"] != "<p>hi</p>" {
-		t.Fatalf("html = %v", rm["html"])
+	if isDraft(c) {
+		t.Fatal("one-shot must not draft")
 	}
 }
 
 func TestSend_PersistFailFallsBackToPlain(t *testing.T) {
+	n := 0
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if strings.HasSuffix(path, "sendRichMessage") {
+		if !strings.HasSuffix(path, "sendMessage") || strings.HasSuffix(path, "sendMessageDraft") {
+			return apiResponse{OK: true}
+		}
+		n++
+		if n == 1 {
 			return apiResponse{OK: false, Description: "boom"}
 		}
-		return apiResponse{OK: true}
+		var r sendMessageResponse
+		r.OK = true
+		return r
 	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
 	if err := tg.Send(context.Background(), "keep me"); err != nil {
@@ -89,34 +119,12 @@ func TestSend_PersistFailFallsBackToPlain(t *testing.T) {
 	}
 	var sawPlain bool
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendMessage") && c.Form["text"] == "keep me" {
+		if isPlainSend(c) && c.Form["text"] == "keep me" {
 			sawPlain = true
 		}
 	}
 	if !sawPlain {
 		t.Fatalf("expected sendMessage fallback with original text, calls=%+v", *calls)
-	}
-}
-
-func TestSend_OverLimitFallsBackToPlain(t *testing.T) {
-	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if strings.HasSuffix(path, "sendRichMessage") {
-			t.Error("should not persist over-limit html")
-		}
-		return apiResponse{OK: true}
-	})
-	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
-	if err := tg.Send(context.Background(), strings.Repeat("x", 40000)); err != nil {
-		t.Fatal(err)
-	}
-	var sawPlain bool
-	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendMessage") {
-			sawPlain = true
-		}
-	}
-	if !sawPlain {
-		t.Fatal("expected plain fallback for over-limit body")
 	}
 }
 
@@ -128,13 +136,10 @@ func TestStream_DraftThenPersist(t *testing.T) {
 			return getChatResponse{OK: true, Result: struct {
 				Type string `json:"type"`
 			}{Type: "private"}}
-		case strings.HasSuffix(path, "sendRichMessageDraft"):
+		case strings.HasSuffix(path, "sendMessageDraft"):
 			return apiResponse{OK: true}
-		case strings.HasSuffix(path, "sendRichMessage"):
-			var r sendRichResponse
-			r.OK = true
-			r.Result.MessageID = 77
-			return r
+		case strings.HasSuffix(path, "sendMessage"):
+			return persistOK()
 		case strings.HasSuffix(path, "editMessageText"):
 			return apiResponse{OK: true}
 		}
@@ -160,7 +165,7 @@ func TestStream_DraftThenPersist(t *testing.T) {
 	var draftID float64
 	for _, c := range *calls {
 		switch {
-		case strings.HasSuffix(c.Path, "sendRichMessageDraft"):
+		case isDraft(c):
 			drafts++
 			id, _ := c.Body["draft_id"].(float64)
 			if id == 0 {
@@ -171,27 +176,21 @@ func TestStream_DraftThenPersist(t *testing.T) {
 			} else if id != draftID {
 				t.Fatalf("draft_id changed %v -> %v", draftID, id)
 			}
-			rm := c.Body["rich_message"].(map[string]any)
-			if !strings.Contains(rm["html"].(string), "<tg-thinking>") {
-				t.Fatalf("draft missing thinking: %v", rm["html"])
+			if id != float64(previewDraftID) {
+				t.Fatalf("draft_id = %v, want %d", id, previewDraftID)
 			}
-			if rm["skip_entity_detection"] != true {
-				t.Fatal("draft skip_entity_detection")
+			if c.Body["parse_mode"] != "HTML" {
+				t.Fatalf("draft parse_mode = %v", c.Body["parse_mode"])
 			}
-		case strings.HasSuffix(c.Path, "sendRichMessage") && !strings.HasSuffix(c.Path, "sendRichMessageDraft"):
+		case isHTMLSend(c):
 			persists++
-			rm := c.Body["rich_message"].(map[string]any)
-			if strings.Contains(rm["html"].(string), "<tg-thinking>") {
-				t.Fatal("persist must not include tg-thinking")
-			}
 		case strings.HasSuffix(c.Path, "editMessageText"):
 			edits++
-			if c.Body["message_id"] != float64(77) {
-				t.Fatalf("edit message_id = %v, want 77", c.Body["message_id"])
+			if c.Form["message_id"] != "77" {
+				t.Fatalf("edit message_id = %q, want 77", c.Form["message_id"])
 			}
-			rm := c.Body["rich_message"].(map[string]any)
-			if strings.Contains(rm["html"].(string), "<tg-thinking>") {
-				t.Fatal("edit must not include tg-thinking")
+			if c.Form["parse_mode"] != "HTML" {
+				t.Fatalf("edit parse_mode = %q", c.Form["parse_mode"])
 			}
 		}
 	}
@@ -202,13 +201,16 @@ func TestStream_DraftThenPersist(t *testing.T) {
 		t.Fatalf("persists = %d, want 1", persists)
 	}
 	if edits != 1 {
-		t.Fatalf("edits = %d, want 1 (same message stays rich)", edits)
+		t.Fatalf("edits = %d, want 1", edits)
 	}
 }
 
 func TestStream_BurstBoundedDrafts(t *testing.T) {
 	clk := newManualClock(time.Unix(1000, 0))
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		if strings.HasSuffix(path, "sendMessage") && !strings.HasSuffix(path, "sendMessageDraft") {
+			return persistOK()
+		}
 		return apiResponse{OK: true}
 	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, clock: clk, chatType: "private"}
@@ -226,7 +228,7 @@ func TestStream_BurstBoundedDrafts(t *testing.T) {
 	}
 	var drafts int
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendRichMessageDraft") {
+		if isDraft(c) {
 			drafts++
 		}
 	}
@@ -240,13 +242,13 @@ func TestStream_BurstBoundedDrafts(t *testing.T) {
 
 func TestStream_NonPrivateSkipsDraftsAndPersists(t *testing.T) {
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if strings.HasSuffix(path, "sendRichMessageDraft") {
+		if strings.HasSuffix(path, "sendMessageDraft") {
 			t.Error("must not draft in a non-private chat")
 		}
 		if strings.HasSuffix(path, "sendMessage") {
-			t.Error("must not fall back to sendMessage for non-private")
+			return persistOK()
 		}
-		return sendRichResponse{OK: true}
+		return apiResponse{OK: true}
 	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, chatType: "supergroup"}
 	s, err := tg.OpenStream(context.Background())
@@ -259,7 +261,7 @@ func TestStream_NonPrivateSkipsDraftsAndPersists(t *testing.T) {
 	}
 	var persists int
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendRichMessage") {
+		if isHTMLSend(c) {
 			persists++
 		}
 	}
@@ -270,11 +272,12 @@ func TestStream_NonPrivateSkipsDraftsAndPersists(t *testing.T) {
 
 func TestStream_DraftAPIErrorFallsBackToPlain(t *testing.T) {
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if strings.HasSuffix(path, "sendRichMessageDraft") {
+		if strings.HasSuffix(path, "sendMessageDraft") {
 			return apiResponse{OK: false, Description: "rate limited"}
 		}
-		if strings.HasSuffix(path, "sendRichMessage") {
-			t.Error("should not persist after genuine draft error")
+		if strings.HasSuffix(path, "sendMessage") && !strings.HasSuffix(path, "sendMessageDraft") {
+			// persist-with-HTML must not run after genuine draft error
+			return persistOK()
 		}
 		return apiResponse{OK: true}
 	})
@@ -287,20 +290,29 @@ func TestStream_DraftAPIErrorFallsBackToPlain(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var sawPlain bool
+	var sawPlain, sawHTML bool
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendMessage") && c.Form["text"] == "hello\n" {
+		if isPlainSend(c) && c.Form["text"] == "hello\n" {
 			sawPlain = true
+		}
+		if isHTMLSend(c) {
+			sawHTML = true
 		}
 	}
 	if !sawPlain {
 		t.Fatalf("expected plain fallback, calls=%+v", *calls)
+	}
+	if sawHTML {
+		t.Fatal("should not persist HTML after genuine draft error")
 	}
 }
 
 func TestStream_RefreshSameDraftID(t *testing.T) {
 	clk := newManualClock(time.Unix(1000, 0))
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		if strings.HasSuffix(path, "sendMessage") && !strings.HasSuffix(path, "sendMessageDraft") {
+			return persistOK()
+		}
 		return apiResponse{OK: true}
 	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, clock: clk, chatType: "private"}
@@ -315,7 +327,7 @@ func TestStream_RefreshSameDraftID(t *testing.T) {
 	}
 	var ids []float64
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendRichMessageDraft") {
+		if isDraft(c) {
 			ids = append(ids, c.Body["draft_id"].(float64))
 		}
 	}
@@ -373,6 +385,9 @@ func TestStream_Serialize(t *testing.T) {
 func TestStream_AbandonPersists(t *testing.T) {
 	clk := newManualClock(time.Unix(1000, 0))
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		if strings.HasSuffix(path, "sendMessage") && !strings.HasSuffix(path, "sendMessageDraft") {
+			return persistOK()
+		}
 		return apiResponse{OK: true}
 	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, clock: clk, chatType: "private"}
@@ -386,16 +401,12 @@ func TestStream_AbandonPersists(t *testing.T) {
 	clk.Advance(streamIdle + time.Second)
 	var persists int
 	for _, c := range *calls {
-		if strings.HasSuffix(c.Path, "sendRichMessage") {
+		if isHTMLSend(c) && strings.Contains(c.Form["text"], "left hanging") {
 			persists++
-			rm := c.Body["rich_message"].(map[string]any)
-			if !strings.Contains(rm["html"].(string), "left hanging") {
-				t.Fatalf("persist html = %v", rm["html"])
-			}
 		}
 	}
 	if persists != 1 {
-		t.Fatalf("abandon should persist, got %d sendRichMessage", persists)
+		t.Fatalf("abandon should persist, got %d HTML sendMessage", persists)
 	}
 }
 
@@ -447,14 +458,17 @@ func TestSend_WaitsForOpenStream(t *testing.T) {
 	var mu sync.Mutex
 	var persistHTML []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "sendRichMessage") {
-			var req sendRichRequest
-			json.NewDecoder(r.Body).Decode(&req)
+		_ = r.ParseForm()
+		if strings.HasSuffix(r.URL.Path, "sendMessage") && !strings.HasSuffix(r.URL.Path, "sendMessageDraft") &&
+			r.FormValue("parse_mode") == "HTML" {
 			mu.Lock()
-			persistHTML = append(persistHTML, req.RichMessage.HTML)
+			persistHTML = append(persistHTML, r.FormValue("text"))
 			mu.Unlock()
 		}
-		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
+		var out sendMessageResponse
+		out.OK = true
+		out.Result.MessageID = 1
+		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -503,39 +517,20 @@ func TestSend_WaitsForOpenStream(t *testing.T) {
 	}
 }
 
-func TestDraftIDSkipsZero(t *testing.T) {
-	tg := &Telegram{}
-	tg.draftSeq.Store(-1) // next Add(1) == 0, must skip
-	id := tg.nextDraftID()
-	if id == 0 || id == thinkingDraftID {
-		t.Fatalf("draft_id = %d, reserved", id)
-	}
-	id2 := tg.nextDraftID()
-	if id2 == 0 || id2 == thinkingDraftID || id2 == id {
-		t.Fatalf("id2 = %d after %d", id2, id)
-	}
-}
-
-func TestSend_HTMLPassthrough(t *testing.T) {
-	var got sendRichRequest
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/botTOKEN/sendRichMessage" {
-			t.Errorf("path %s", r.URL.Path)
-		}
-		json.NewDecoder(r.Body).Decode(&got)
-		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
-	}))
-	defer srv.Close()
+func TestSend_HTMLDownconvert(t *testing.T) {
+	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		return persistOK()
+	})
 	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
 	in := "<p>hello <b>world</b></p>"
 	if err := tg.Send(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
-	if got.RichMessage.HTML != in {
-		t.Fatalf("html = %q, want passthrough", got.RichMessage.HTML)
+	if len(*calls) != 1 || !isHTMLSend((*calls)[0]) {
+		t.Fatalf("calls=%+v", *calls)
 	}
-	if !got.RichMessage.SkipEntityDetection {
-		t.Fatal("skip_entity_detection")
+	if (*calls)[0].Form["text"] != "hello <b>world</b>" {
+		t.Fatalf("text = %q", (*calls)[0].Form["text"])
 	}
 }
 
@@ -549,16 +544,15 @@ func TestShowThinking_SendsDraft(t *testing.T) {
 	}
 	var drafts int
 	for _, c := range *calls {
-		if !strings.HasSuffix(c.Path, "sendRichMessageDraft") {
+		if !isDraft(c) {
 			continue
 		}
 		drafts++
-		if c.Body["draft_id"] != float64(thinkingDraftID) {
-			t.Fatalf("draft_id = %v, want %d", c.Body["draft_id"], thinkingDraftID)
+		if c.Body["draft_id"] != float64(previewDraftID) {
+			t.Fatalf("draft_id = %v, want %d", c.Body["draft_id"], previewDraftID)
 		}
-		rm := c.Body["rich_message"].(map[string]any)
-		if rm["html"] != "<tg-thinking>Thinking...</tg-thinking>" {
-			t.Fatalf("html = %v", rm["html"])
+		if c.Body["text"] != "" {
+			t.Fatalf("thinking text = %v, want empty", c.Body["text"])
 		}
 	}
 	if drafts != 1 {
@@ -568,7 +562,7 @@ func TestShowThinking_SendsDraft(t *testing.T) {
 
 func TestShowThinking_NonPrivateFallsBackToTyping(t *testing.T) {
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
-		if strings.HasSuffix(path, "sendRichMessageDraft") {
+		if strings.HasSuffix(path, "sendMessageDraft") {
 			t.Error("must not draft thinking in a non-private chat")
 		}
 		return apiResponse{OK: true}
@@ -585,5 +579,30 @@ func TestShowThinking_NonPrivateFallsBackToTyping(t *testing.T) {
 	}
 	if typing != 1 {
 		t.Fatalf("typing = %d, want 1", typing)
+	}
+}
+
+func TestSend_NeverCallsRichAPI(t *testing.T) {
+	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
+		if strings.Contains(path, "Rich") {
+			t.Errorf("rich API called: %s", path)
+		}
+		return persistOK()
+	})
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, chatType: "private"}
+	if err := tg.Send(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tg.ShowThinking(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s, err := tg.OpenStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = s.Write([]byte("x\n"))
+	_ = s.Close()
+	if len(*calls) == 0 {
+		t.Fatal("no calls")
 	}
 }

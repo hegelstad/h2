@@ -21,13 +21,13 @@
   the Bot API rich-draft path will replace it. Outbound Telegram is
   again a plain `sendMessage` of the unmodified text. Losing inbound
   image/file handling is accepted.
-- **Telegram rich drafts as the default outbound path**: `h2 send` to
-  Telegram now persists via `sendRichMessage` (HTML rendered from
-  newlines / lists / fences / `` `code` `` / `**bold**`). `h2 send
-  --stdin` streams `sendRichMessageDraft` (preview), then
-  `sendRichMessage` (persist), then `editMessageText` on that same
-  message. Plain `sendMessage` is only used if rich fails.
-  `skip_entity_detection` is always on. No `--format` flag.
+- **Telegram chat HTML (not rich documents)**: `h2 send` to Telegram
+  persists via `sendMessage` + `parse_mode=HTML` so replies look like
+  normal chat bubbles. `sendMessageDraft` with empty text shows
+  “Thinking…”; `--stdin` streams the same regular draft, then
+  persists with `sendMessage`. Rich-only tags (`<p>`, `<ul>`, …) are
+  downconverted. `sendRichMessage` is not used. No `--format` flag.
+  If HTML is rejected, the original text is sent plain.
 
 ### Bug Fixes
 

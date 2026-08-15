@@ -7,20 +7,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"h2/internal/bridge"
-	"h2/internal/bridge/richhtml"
+	"h2/internal/bridge/tghtml"
 )
 
 const (
-	// skipEntityDetection is always set on InputRichMessage. Our bodies
-	// contain file paths, /commands and @names that Telegram would
-	// otherwise auto-link (and then prompt "Open this link?").
-	skipEntityDetection = true
-
 	draftMinInterval = 200 * time.Millisecond
 	draftRefresh     = 20 * time.Second
 	streamIdle       = 60 * time.Second
@@ -28,27 +25,27 @@ const (
 	// botAPITimeout bounds every Bot API call except getUpdates (long poll).
 	botAPITimeout = 30 * time.Second
 
-	// thinkingDraftID is reserved for the agent-active "Thinking..." preview.
-	// Stream draft ids skip this value.
-	thinkingDraftID int64 = 1
+	// previewDraftID is the single outbound preview id for this chat.
+	// Thinking and --stdin share it so the placeholder animates into
+	// the streamed body instead of stacking two drafts.
+	previewDraftID int64 = 1
 )
 
-// Send renders text as rich HTML and persists it with sendRichMessage.
-// One-shot never drafts. Any genuine render or persist error falls back
-// to plain sendMessage of the original unmodified text.
+// Send renders text as Telegram chat HTML and persists it with
+// sendMessage + parse_mode=HTML. One-shot never drafts. A genuine
+// render or persist error falls back to plain sendMessage of the
+// original unmodified text.
 func (t *Telegram) Send(ctx context.Context, text string) error {
 	t.StopThinking()
 	t.streamMu.Lock()
 	defer t.streamMu.Unlock()
-	// Always InputRichMessage.html. Caller HTML is passed through;
-	// plain text is rendered. Never markdown or blocks.
-	html, err := richhtml.HTML(text)
+	html, err := tghtml.HTML(text)
 	if err != nil {
-		log.Printf("telegram rich html: %v; falling back to sendMessage", err)
+		log.Printf("telegram html: %v; falling back to plain sendMessage", err)
 		return t.sendPlain(ctx, text)
 	}
-	if _, err := t.sendRichMessage(ctx, html); err != nil {
-		log.Printf("telegram sendRichMessage: %v; falling back to sendMessage", err)
+	if err := t.sendHTML(ctx, html); err != nil {
+		log.Printf("telegram sendMessage HTML: %v; falling back to plain", err)
 		return t.sendPlain(ctx, text)
 	}
 	return nil
@@ -57,7 +54,20 @@ func (t *Telegram) Send(ctx context.Context, text string) error {
 func (t *Telegram) sendPlain(ctx context.Context, text string) error {
 	chunks := bridge.SplitMessage(text, maxMessageLen, maxPages)
 	for _, chunk := range chunks {
-		if err := t.sendChunk(ctx, chunk); err != nil {
+		if _, err := t.sendMessage(ctx, chunk, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *Telegram) sendHTML(ctx context.Context, html string) error {
+	if html == "" {
+		return nil
+	}
+	chunks := bridge.SplitMessage(html, maxMessageLen, maxPages)
+	for _, chunk := range chunks {
+		if _, err := t.sendMessage(ctx, chunk, "HTML"); err != nil {
 			return err
 		}
 	}
@@ -86,18 +96,9 @@ func (t *Telegram) clk() clock {
 	return realClock{}
 }
 
-func (t *Telegram) nextDraftID() int64 {
-	for {
-		id := t.draftSeq.Add(1)
-		if id != 0 && id != thinkingDraftID {
-			return id
-		}
-	}
-}
-
-// ShowThinking posts an ephemeral Telegram rich draft with
-// <tg-thinking>Thinking...</tg-thinking>. Private chats only; otherwise
-// it falls back to the normal typing chat action. Same draft_id so
+// ShowThinking posts an ephemeral sendMessageDraft with empty text so
+// Telegram shows the official “Thinking…” placeholder. Private chats
+// only; otherwise the normal typing chat action. Same draft_id so
 // refreshes animate instead of stacking.
 func (t *Telegram) ShowThinking(ctx context.Context) error {
 	t.mu.Lock()
@@ -124,8 +125,7 @@ func (t *Telegram) postThinking(ctx context.Context) error {
 	if !t.chatIsPrivate(ctx) {
 		return t.SendTyping(ctx)
 	}
-	html := "<tg-thinking>Thinking...</tg-thinking>"
-	if err := t.sendRichDraft(ctx, thinkingDraftID, html); err != nil {
+	if err := t.sendDraft(ctx, previewDraftID, "", ""); err != nil {
 		log.Printf("telegram thinking draft: %v; falling back to typing", err)
 		return t.SendTyping(ctx)
 	}
@@ -154,23 +154,7 @@ func (t *Telegram) armThinkingRefresh() {
 	})
 }
 
-type inputRichMessage struct {
-	HTML                string `json:"html"`
-	SkipEntityDetection bool   `json:"skip_entity_detection"`
-}
-
-type sendRichRequest struct {
-	ChatID      int64            `json:"chat_id"`
-	RichMessage inputRichMessage `json:"rich_message"`
-}
-
-type sendRichDraftRequest struct {
-	ChatID      int64            `json:"chat_id"`
-	DraftID     int64            `json:"draft_id"`
-	RichMessage inputRichMessage `json:"rich_message"`
-}
-
-type sendRichResponse struct {
+type sendMessageResponse struct {
 	OK          bool   `json:"ok"`
 	Description string `json:"description,omitempty"`
 	Result      struct {
@@ -178,25 +162,51 @@ type sendRichResponse struct {
 	} `json:"result"`
 }
 
-type editRichRequest struct {
-	ChatID      int64            `json:"chat_id"`
-	MessageID   int64            `json:"message_id"`
-	RichMessage inputRichMessage `json:"rich_message"`
+func (t *Telegram) sendMessage(ctx context.Context, text, parseMode string) (messageID int64, err error) {
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
+	form := url.Values{
+		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
+		"text":    {text},
+	}
+	if parseMode != "" {
+		form.Set("parse_mode", parseMode)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return 0, fmt.Errorf("telegram send: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.sendHTTPClient().Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("telegram send: %w", err)
+	}
+	defer resp.Body.Close()
+	var result sendMessageResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return 0, fmt.Errorf("telegram send: decode: %w", err)
+	}
+	if !result.OK {
+		return 0, fmt.Errorf("telegram send: API error: %s", result.Description)
+	}
+	return result.Result.MessageID, nil
 }
 
-func (t *Telegram) sendEditRich(ctx context.Context, messageID int64, html string) error {
-	body, err := json.Marshal(editRichRequest{
-		ChatID:    t.ChatID,
-		MessageID: messageID,
-		RichMessage: inputRichMessage{
-			HTML:                html,
-			SkipEntityDetection: skipEntityDetection,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("telegram editMessageText: marshal: %w", err)
+func (t *Telegram) sendEditHTML(ctx context.Context, messageID int64, html string) error {
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
+	form := url.Values{
+		"chat_id":    {strconv.FormatInt(t.ChatID, 10)},
+		"message_id": {strconv.FormatInt(messageID, 10)},
+		"text":       {html},
+		"parse_mode": {"HTML"},
 	}
-	resp, err := t.postJSON(ctx, "editMessageText", body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("editMessageText"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("telegram editMessageText: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.sendHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram editMessageText: %w", err)
 	}
@@ -211,55 +221,34 @@ func (t *Telegram) sendEditRich(ctx context.Context, messageID int64, html strin
 	return nil
 }
 
-func (t *Telegram) sendRichMessage(ctx context.Context, html string) (messageID int64, err error) {
-	body, err := json.Marshal(sendRichRequest{
-		ChatID: t.ChatID,
-		RichMessage: inputRichMessage{
-			HTML:                html,
-			SkipEntityDetection: skipEntityDetection,
-		},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("telegram sendRichMessage: marshal: %w", err)
-	}
-	resp, err := t.postJSON(ctx, "sendRichMessage", body)
-	if err != nil {
-		return 0, fmt.Errorf("telegram sendRichMessage: %w", err)
-	}
-	defer resp.Body.Close()
-	var result sendRichResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, fmt.Errorf("telegram sendRichMessage: decode: %w", err)
-	}
-	if !result.OK {
-		return 0, fmt.Errorf("telegram sendRichMessage: API error: %s", result.Description)
-	}
-	return result.Result.MessageID, nil
+type sendDraftRequest struct {
+	ChatID    int64  `json:"chat_id"`
+	DraftID   int64  `json:"draft_id"`
+	Text      string `json:"text"`
+	ParseMode string `json:"parse_mode,omitempty"`
 }
 
-func (t *Telegram) sendRichDraft(ctx context.Context, draftID int64, html string) error {
-	body, err := json.Marshal(sendRichDraftRequest{
-		ChatID:  t.ChatID,
-		DraftID: draftID,
-		RichMessage: inputRichMessage{
-			HTML:                html,
-			SkipEntityDetection: skipEntityDetection,
-		},
+func (t *Telegram) sendDraft(ctx context.Context, draftID int64, text, parseMode string) error {
+	body, err := json.Marshal(sendDraftRequest{
+		ChatID:    t.ChatID,
+		DraftID:   draftID,
+		Text:      text,
+		ParseMode: parseMode,
 	})
 	if err != nil {
-		return fmt.Errorf("telegram sendRichMessageDraft: marshal: %w", err)
+		return fmt.Errorf("telegram sendMessageDraft: marshal: %w", err)
 	}
-	resp, err := t.postJSON(ctx, "sendRichMessageDraft", body)
+	resp, err := t.postJSON(ctx, "sendMessageDraft", body)
 	if err != nil {
-		return fmt.Errorf("telegram sendRichMessageDraft: %w", err)
+		return fmt.Errorf("telegram sendMessageDraft: %w", err)
 	}
 	defer resp.Body.Close()
 	var result apiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("telegram sendRichMessageDraft: decode: %w", err)
+		return fmt.Errorf("telegram sendMessageDraft: decode: %w", err)
 	}
 	if !result.OK {
-		return fmt.Errorf("telegram sendRichMessageDraft: API error: %s", result.Description)
+		return fmt.Errorf("telegram sendMessageDraft: API error: %s", result.Description)
 	}
 	return nil
 }
@@ -337,7 +326,7 @@ type Stream struct {
 	dirty       bool
 	closed      bool
 	gaveUp      bool // genuine draft error → persist skipped, plain fallback
-	drafted     bool // at least one successful sendRichMessageDraft
+	drafted     bool
 	persisted   bool
 	messageID   int64
 	stopRefresh func()
@@ -351,12 +340,13 @@ type Stream struct {
 // until the first stream is Closed. Chat type is resolved before taking
 // streamMu so a stalled getChat cannot pin the outbound lock.
 func (t *Telegram) OpenStream(ctx context.Context) (bridge.MessageStream, error) {
+	t.StopThinking()
 	private := t.chatIsPrivate(ctx)
 	t.streamMu.Lock()
 	s := &Stream{
 		t:       t,
 		ctx:     ctx,
-		draftID: t.nextDraftID(),
+		draftID: previewDraftID,
 		private: private,
 		done:    make(chan struct{}),
 	}
@@ -416,19 +406,19 @@ func (s *Stream) scheduleFlushLocked() {
 	})
 }
 
-// flushLocked: draft (preview) → sendRichMessage (persist, get id) →
+// flushLocked: draft (preview) → sendMessage (persist, get id) →
 // editMessageText on that same message. A draft is not a message and
 // cannot be edited into permanence.
 func (s *Stream) flushLocked() {
+	html, err := tghtml.HTML(string(s.buf))
+	if err != nil {
+		log.Printf("telegram stream render: %v; will fall back on close", err)
+		s.gaveUp = true
+		s.dirty = false
+		return
+	}
 	if s.persisted && s.messageID != 0 {
-		html, err := richhtml.Render(string(s.buf), richhtml.Options{})
-		if err != nil {
-			log.Printf("telegram edit render: %v; will fall back on close", err)
-			s.gaveUp = true
-			s.dirty = false
-			return
-		}
-		if err := s.t.sendEditRich(s.ctx, s.messageID, html); err != nil {
+		if err := s.t.sendEditHTML(s.ctx, s.messageID, html); err != nil {
 			log.Printf("telegram editMessageText: %v; will fall back on close", err)
 			s.gaveUp = true
 			s.dirty = false
@@ -444,19 +434,13 @@ func (s *Stream) flushLocked() {
 		return
 	}
 	if s.private && !s.drafted {
-		html, err := richhtml.Render(string(s.buf), richhtml.Options{Thinking: true})
-		if err != nil {
-			log.Printf("telegram draft render: %v; will persist or fall back on close", err)
-			s.dirty = false
-			return
-		}
-		if err := s.t.sendRichDraft(s.ctx, s.draftID, html); err != nil {
+		if err := s.t.sendDraft(s.ctx, s.draftID, html, "HTML"); err != nil {
 			if isNotPrivateDraftError(err) {
 				s.private = false
 				s.dirty = true
 				return
 			}
-			log.Printf("telegram sendRichMessageDraft: %v; will fall back on close", err)
+			log.Printf("telegram sendMessageDraft: %v; will fall back on close", err)
 			s.gaveUp = true
 			s.dirty = false
 			return
@@ -468,16 +452,9 @@ func (s *Stream) flushLocked() {
 		s.armRefreshLocked()
 		return
 	}
-	html, err := richhtml.Render(string(s.buf), richhtml.Options{})
+	id, err := s.t.sendMessage(s.ctx, html, "HTML")
 	if err != nil {
-		log.Printf("telegram persist render: %v; will fall back on close", err)
-		s.gaveUp = true
-		s.dirty = false
-		return
-	}
-	id, err := s.t.sendRichMessage(s.ctx, html)
-	if err != nil {
-		log.Printf("telegram sendRichMessage: %v; will fall back on close", err)
+		log.Printf("telegram sendMessage HTML: %v; will fall back on close", err)
 		s.gaveUp = true
 		s.dirty = false
 		return
@@ -513,7 +490,7 @@ func (s *Stream) armRefreshLocked() {
 		if s.closed || s.gaveUp || !s.private || s.lastHTML == "" {
 			return
 		}
-		if err := s.t.sendRichDraft(s.ctx, s.draftID, s.lastHTML); err != nil {
+		if err := s.t.sendDraft(s.ctx, s.draftID, s.lastHTML, "HTML"); err != nil {
 			if isNotPrivateDraftError(err) {
 				s.private = false
 				return
@@ -582,17 +559,17 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	if gaveUp {
-		log.Printf("telegram stream: falling back to sendMessage after draft failure")
+		log.Printf("telegram stream: falling back to plain sendMessage after draft failure")
 		return s.t.sendPlain(s.ctx, text)
 	}
-	html, err := richhtml.Render(text, richhtml.Options{})
+	html, err := tghtml.HTML(text)
 	if err != nil {
-		log.Printf("telegram persist render: %v; falling back to sendMessage", err)
+		log.Printf("telegram persist render: %v; falling back to plain", err)
 		return s.t.sendPlain(s.ctx, text)
 	}
 	if persisted && messageID != 0 {
-		if err := s.t.sendEditRich(s.ctx, messageID, html); err != nil {
-			log.Printf("telegram editMessageText: %v; falling back to sendMessage", err)
+		if err := s.t.sendEditHTML(s.ctx, messageID, html); err != nil {
+			log.Printf("telegram editMessageText: %v; falling back to plain", err)
 			return s.t.sendPlain(s.ctx, text)
 		}
 		return nil
@@ -600,8 +577,8 @@ func (s *Stream) Close() error {
 	if persisted {
 		return nil
 	}
-	if _, err := s.t.sendRichMessage(s.ctx, html); err != nil {
-		log.Printf("telegram sendRichMessage: %v; falling back to sendMessage", err)
+	if err := s.t.sendHTML(s.ctx, html); err != nil {
+		log.Printf("telegram sendMessage HTML: %v; falling back to plain", err)
 		return s.t.sendPlain(s.ctx, text)
 	}
 	return nil

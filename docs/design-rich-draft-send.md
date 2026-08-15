@@ -1,3 +1,9 @@
+# SUPERSEDED — see design-telegram-chat-send.md
+
+Rich `sendRichMessage` is a document surface (oversized type). We persist
+with regular `sendMessage` + `parse_mode=HTML` and think with
+`sendMessageDraft` (empty text). This file is historical.
+
 # Design: Bot API rich drafts as the only outbound Telegram path
 
 ## Summary
