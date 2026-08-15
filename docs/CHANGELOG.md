@@ -21,8 +21,23 @@
   the Bot API rich-draft path will replace it. Outbound Telegram is
   again a plain `sendMessage` of the unmodified text. Losing inbound
   image/file handling is accepted.
+- **Telegram chat HTML (not rich documents)**: `h2 send` to Telegram
+  persists via `sendMessage` + `parse_mode=HTML` so replies look like
+  normal chat bubbles. While the target agent is active, the bridge
+  refreshes the classic blue typing indicator (`sendChatAction`)
+  every 4s. There is no Thinking preview and no `sendMessageDraft`.
+  `--stdin` buffers and sends one `sendMessage` on close. Rich-only
+  tags (`<p>`, `<ul>`, …) are downconverted. `sendRichMessage` is
+  not used. No `--format` flag. If HTML is rejected, the original
+  text is sent plain.
 
 ### Bug Fixes
+
+- **Attach first-try drop**: `ReadResponse`/`ReadRequest` no longer use
+  `json.Decoder`, which buffered past the handshake newline and could
+  swallow the first binary attach frames. First `h2 attach` after a cold
+  start then desynced and exited with no error. Handshake JSON is now
+  read one byte at a time through the terminating newline.
 
 - **Test isolation guard**: `setupFakeHome` now points `H2_DIR` at a
   temp h2 directory with a marker and fails the test if `ResolveDir`

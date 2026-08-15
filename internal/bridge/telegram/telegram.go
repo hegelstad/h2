@@ -45,6 +45,8 @@ type Telegram struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	offset int64
+
+	streamMu sync.Mutex
 }
 
 func (t *Telegram) Name() string { return "telegram" }
@@ -60,39 +62,6 @@ func (t *Telegram) apiURL(method string) string {
 		base = "https://api.telegram.org"
 	}
 	return fmt.Sprintf("%s/bot%s/%s", base, t.Token, method)
-}
-
-// Send posts a text message to the configured chat. Messages longer than
-// Telegram's 4096-character limit are split into multiple messages at line
-// boundaries when possible, up to maxPages messages.
-func (t *Telegram) Send(ctx context.Context, text string) error {
-	chunks := bridge.SplitMessage(text, maxMessageLen, maxPages)
-	for _, chunk := range chunks {
-		if err := t.sendChunk(ctx, chunk); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (t *Telegram) sendChunk(ctx context.Context, text string) error {
-	resp, err := t.client.PostForm(t.apiURL("sendMessage"), url.Values{
-		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
-		"text":    {text},
-	})
-	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result apiResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("telegram send: decode response: %w", err)
-	}
-	if !result.OK {
-		return fmt.Errorf("telegram send: API error: %s", result.Description)
-	}
-	return nil
 }
 
 // Start begins long-polling for incoming messages. It spawns a goroutine
