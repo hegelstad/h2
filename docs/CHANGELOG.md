@@ -4,28 +4,6 @@
 
 ### New Features
 
-- **HTML / MarkdownV2 message formatting**: Added `--format HTML|MarkdownV2`
-  flag to `h2 send`. When the target is a bridge that implements the new
-  `FormattedSender` capability interface (currently Telegram, via parse_mode),
-  the body is delivered as rich text. Bridges that do not implement
-  `FormattedSender` and agent targets reject the flag with a clear error
-  (no silent fallback). The agent-tag prefix (`[from-agent] `) is kept as
-  plain text outside the formatted body. Callers are responsible for
-  escaping HTML or MarkdownV2 reserved characters inside the body.
-- **Structured rich messages (Telegram Bot API 10.1)**: Added `--format rich`
-  (Markdown body) and `--format rich-html` (HTML body) to `h2 send`. When the
-  target is a bridge that implements the new `RichSender` capability interface
-  (currently Telegram, via `sendRichMessage`), the body is delivered as a
-  structured rich message supporting headings, lists, tables, block
-  quotations, collapsible blocks, and formulas — beyond what parse_mode
-  allows. Rich bodies may be up to 32768 characters. Bridges that do not
-  implement `RichSender` reject the flag with a clear error (no silent
-  fallback).
-- **Inbound Telegram media**: Photos and documents sent to the Telegram bridge
-  are downloaded to `$H2_DIR/media/telegram/` and handed to the receiving agent
-  as a message containing the caption plus the saved local file path, so the
-  agent can open it with its Read tool. The largest photo size is selected;
-  reply-to agent tags are preserved for routing.
 - **Rate-limit bridge notifications**: When an agent hits a Claude/Codex usage
   limit, h2 now sends a one-time alert over every running bridge (e.g.
   Telegram) with the agent name, profile, reset time, and a `h2 rotate` hint.
@@ -33,6 +11,16 @@
   the profile's `ratelimit.json`), runs off the monitor goroutine, and reaches
   the user even though the limited agent itself cannot make model calls (the
   bridge is a separate process). Costs no model tokens.
+
+### Changes
+
+- **Revert custom Telegram formatting layer**: Removed `--format`
+  (HTML / MarkdownV2 / rich / rich-html), the `FormattedSender` and
+  `RichSender` interfaces, and inbound photo/document handling. This is
+  a deliberate revert of the custom formatting layer, not a regression:
+  the Bot API rich-draft path will replace it. Outbound Telegram is
+  again a plain `sendMessage` of the unmodified text. Losing inbound
+  image/file handling is accepted.
 
 ## v0.3.2
 

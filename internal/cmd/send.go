@@ -5,12 +5,10 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"h2/internal/bridge"
 	"h2/internal/session/message"
 	"h2/internal/socketdir"
 )
@@ -22,32 +20,19 @@ func newSendCmd() *cobra.Command {
 	var raw bool
 	var expectsResponse bool
 	var respondsTo string
-	var format string
 
 	cmd := &cobra.Command{
-		Use:   "send [<name>] [--priority=normal] [--file=path] [--raw] [--expects-response] [--closes=<id>] [--format=HTML|MarkdownV2|rich|rich-html] [message...]",
-		Short: "Send a message to an agent or bridge",
-		Long: `Send a message to a running agent or bridge. The message body can be provided as arguments or read from a file.
+		Use:   "send [<name>] [--priority=normal] [--file=path] [--raw] [--expects-response] [--closes=<id>] [message...]",
+		Short: "Send a message to an agent",
+		Long: `Send a message to a running agent. The message body can be provided as arguments or read from a file.
 With --raw, the body is sent directly to the agent's PTY without the header prefix.
 With --expects-response, a reminder trigger is registered on the recipient that fires at idle.
-With --closes <id>, the reminder trigger is removed from your own daemon (and optionally a response is sent).
-With --format HTML or --format MarkdownV2, the body is delivered using the bridge's
-formatted-send capability (e.g. Telegram parse_mode). Only valid for bridge targets that
-implement FormattedSender. The caller is responsible for escaping the body appropriately
-(HTML special characters or MarkdownV2 reserved characters).
-With --format rich (Markdown) or --format rich-html (HTML), the body is delivered as a
-structured rich message supporting headings, lists, tables, block quotations, collapsible
-blocks, and formulas (e.g. Telegram sendRichMessage). Only valid for bridge targets that
-implement RichSender.`,
+With --closes <id>, the reminder trigger is removed from your own daemon (and optionally a response is sent).`,
 		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateFormat(format); err != nil {
-				return err
-			}
-
 			// --closes mode: target and body are both optional.
 			if respondsTo != "" {
-				return handleCloses(respondsTo, args, file, priority, format, allowSelf)
+				return handleCloses(respondsTo, args, file, priority, allowSelf)
 			}
 
 			// Normal send or --expects-response: target is required.
@@ -99,13 +84,6 @@ implement RichSender.`,
 				removeTriggerBestEffort(name, triggerID)
 				return agentConnError(name, findErr)
 			}
-			if format != "" {
-				entry, ok := socketdir.Parse(filepath.Base(sockPath))
-				if !ok || entry.Type != socketdir.TypeBridge {
-					removeTriggerBestEffort(name, triggerID)
-					return fmt.Errorf("--format is only valid for bridge targets; %q is an %s", name, entry.Type)
-				}
-			}
 			conn, err := net.Dial("unix", sockPath)
 			if err != nil {
 				removeTriggerBestEffort(name, triggerID)
@@ -118,7 +96,6 @@ implement RichSender.`,
 				From:     from,
 				Body:     body,
 				Raw:      raw,
-				Format:   format,
 			}
 			if expectsResponse {
 				req.ExpectsResponse = true
@@ -158,22 +135,8 @@ implement RichSender.`,
 	cmd.Flags().BoolVar(&raw, "raw", false, "Send body directly to PTY without header prefix (useful for permission prompts)")
 	cmd.Flags().BoolVar(&expectsResponse, "expects-response", false, "Register an idle reminder trigger on the recipient")
 	cmd.Flags().StringVar(&respondsTo, "closes", "", "Close a reminder trigger by ID (and optionally send a response)")
-	cmd.Flags().StringVar(&format, "format", "", "Bridge formatting for the body: HTML or MarkdownV2 (parse_mode), or rich / rich-html (structured rich message); bridge targets only")
 
 	return cmd
-}
-
-// validateFormat checks that --format, if set, is a value supported by the
-// FormattedSender capability. Empty is allowed (plain send).
-func validateFormat(format string) error {
-	switch format {
-	case "", "HTML", "MarkdownV2":
-		return nil
-	}
-	if _, ok := bridge.IsRichFormat(format); ok {
-		return nil
-	}
-	return fmt.Errorf("invalid --format %q (must be HTML, MarkdownV2, rich, or rich-html)", format)
 }
 
 // registerExpectsResponseTrigger registers an idle reminder trigger on the
@@ -245,7 +208,7 @@ func removeTriggerBestEffort(agentName, triggerID string) {
 
 // handleCloses handles the --responds-to flow: optionally send a response,
 // then remove the trigger from own daemon.
-func handleCloses(triggerID string, args []string, file, priority, format string, allowSelf bool) error {
+func handleCloses(triggerID string, args []string, file, priority string, allowSelf bool) error {
 	var name, body string
 
 	if file != "" {
@@ -289,12 +252,6 @@ func handleCloses(triggerID string, args []string, file, priority, format string
 		if findErr != nil {
 			return agentConnError(name, findErr)
 		}
-		if format != "" {
-			entry, ok := socketdir.Parse(filepath.Base(sockPath))
-			if !ok || entry.Type != socketdir.TypeBridge {
-				return fmt.Errorf("--format is only valid for bridge targets; %q is an %s", name, entry.Type)
-			}
-		}
 		conn, err := net.Dial("unix", sockPath)
 		if err != nil {
 			return agentConnError(name, err)
@@ -306,7 +263,6 @@ func handleCloses(triggerID string, args []string, file, priority, format string
 			Priority: priority,
 			From:     from,
 			Body:     body,
-			Format:   format,
 		}); err != nil {
 			return fmt.Errorf("send request: %w", err)
 		}
