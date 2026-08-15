@@ -331,7 +331,15 @@ func (s *Service) handleStreamOpen(req *message.Request) *message.Response {
 	s.mu.Lock()
 	s.streams[id] = &liveStream{s: stream, from: req.From}
 	s.mu.Unlock()
+	go s.reapStream(id, stream.Done())
 	return &message.Response{OK: true, StreamID: id}
+}
+
+func (s *Service) reapStream(id string, done <-chan struct{}) {
+	<-done
+	s.mu.Lock()
+	delete(s.streams, id)
+	s.mu.Unlock()
 }
 
 func (s *Service) handleStreamWrite(req *message.Request) *message.Response {

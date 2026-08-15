@@ -382,6 +382,110 @@ func TestStream_AbandonPersists(t *testing.T) {
 	}
 }
 
+func TestOpenStream_HangingGetChatDoesNotHoldLock(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "getChat") {
+			close(started)
+			<-r.Context().Done()
+			return
+		}
+		json.NewEncoder(w).Encode(apiResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = tg.OpenStream(ctx)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("getChat never started")
+	}
+	tg.mu.Lock()
+	tg.chatType = "private"
+	tg.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		s, err := tg.OpenStream(context.Background())
+		if err != nil {
+			t.Error(err)
+		} else {
+			_ = s.Close()
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("streamMu held during hanging getChat")
+	}
+}
+
+func TestSend_WaitsForOpenStream(t *testing.T) {
+	var mu sync.Mutex
+	var persistHTML []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "sendRichMessage") {
+			var req sendRichRequest
+			json.NewDecoder(r.Body).Decode(&req)
+			mu.Lock()
+			persistHTML = append(persistHTML, req.RichMessage.HTML)
+			mu.Unlock()
+		}
+		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL, chatType: "private"}
+	s, err := tg.OpenStream(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Write([]byte("stream body\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	sendDone := make(chan error, 1)
+	go func() {
+		close(started)
+		sendDone <- tg.Send(context.Background(), "one shot")
+	}()
+	<-started
+	select {
+	case err := <-sendDone:
+		t.Fatalf("Send completed while stream open: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Send did not proceed after stream close")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(persistHTML) < 2 {
+		t.Fatalf("persists = %v, want stream then one-shot", persistHTML)
+	}
+	if !strings.Contains(persistHTML[0], "stream body") {
+		t.Fatalf("first persist = %q, want stream body", persistHTML[0])
+	}
+	if !strings.Contains(persistHTML[len(persistHTML)-1], "one shot") {
+		t.Fatalf("last persist = %q, want one shot", persistHTML[len(persistHTML)-1])
+	}
+}
+
 func TestDraftIDSkipsZero(t *testing.T) {
 	tg := &Telegram{}
 	tg.draftSeq.Store(-1) // next Add(1) == 0, must skip

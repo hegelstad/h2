@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -69,10 +70,18 @@ func (t *Telegram) apiURL(method string) string {
 }
 
 func (t *Telegram) sendChunk(ctx context.Context, text string) error {
-	resp, err := t.client.PostForm(t.apiURL("sendMessage"), url.Values{
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
+	form := url.Values{
 		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
 		"text":    {text},
-	})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("telegram send: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.sendHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram send: %w", err)
 	}

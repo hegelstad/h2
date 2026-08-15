@@ -13,4 +13,6 @@ type Streamer interface {
 type MessageStream interface {
 	Write(p []byte) (int, error)
 	Close() error
+	// Done is closed when the stream ends, including self-close on abandon.
+	Done() <-chan struct{}
 }

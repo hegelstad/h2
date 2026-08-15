@@ -24,12 +24,17 @@ const (
 	draftMinInterval = 200 * time.Millisecond
 	draftRefresh     = 20 * time.Second
 	streamIdle       = 60 * time.Second
+
+	// botAPITimeout bounds every Bot API call except getUpdates (long poll).
+	botAPITimeout = 30 * time.Second
 )
 
 // Send renders text as rich HTML and persists it with sendRichMessage.
 // One-shot never drafts. Any genuine render or persist error falls back
 // to plain sendMessage of the original unmodified text.
 func (t *Telegram) Send(ctx context.Context, text string) error {
+	t.streamMu.Lock()
+	defer t.streamMu.Unlock()
 	html, err := richhtml.Render(text, richhtml.Options{})
 	if err != nil {
 		log.Printf("telegram rich render: %v; falling back to sendMessage", err)
@@ -50,6 +55,21 @@ func (t *Telegram) sendPlain(ctx context.Context, text string) error {
 		}
 	}
 	return nil
+}
+
+func (t *Telegram) sendHTTPClient() *http.Client {
+	c := t.client
+	if c.Timeout == 0 {
+		c.Timeout = botAPITimeout
+	}
+	return &c
+}
+
+func withAPITimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, botAPITimeout)
 }
 
 func (t *Telegram) clk() clock {
@@ -146,12 +166,14 @@ func (t *Telegram) sendRichDraft(ctx context.Context, draftID int64, html string
 }
 
 func (t *Telegram) postJSON(ctx context.Context, method string, body []byte) (*http.Response, error) {
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL(method), bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	return t.client.Do(req)
+	return t.sendHTTPClient().Do(req)
 }
 
 type getChatResponse struct {
@@ -169,7 +191,13 @@ func (t *Telegram) chatIsPrivate(ctx context.Context) bool {
 	if cached != "" {
 		return cached == "private"
 	}
-	resp, err := t.client.Get(t.apiURL("getChat") + "?chat_id=" + strconv.FormatInt(t.ChatID, 10))
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.apiURL("getChat")+"?chat_id="+strconv.FormatInt(t.ChatID, 10), nil)
+	if err != nil {
+		return true
+	}
+	resp, err := t.sendHTTPClient().Do(req)
 	if err != nil {
 		return true // try drafts; a not-private error is handled at draft time
 	}
@@ -214,22 +242,28 @@ type Stream struct {
 	stopFlush   func()
 	stopAbandon func()
 	abandoned   bool
+	done        chan struct{}
 }
 
 // OpenStream starts a serialized outbound stream. A second call blocks
-// until the first stream is Closed.
+// until the first stream is Closed. Chat type is resolved before taking
+// streamMu so a stalled getChat cannot pin the outbound lock.
 func (t *Telegram) OpenStream(ctx context.Context) (bridge.MessageStream, error) {
+	private := t.chatIsPrivate(ctx)
 	t.streamMu.Lock()
 	s := &Stream{
 		t:       t,
 		ctx:     ctx,
 		draftID: t.nextDraftID(),
-		private: t.chatIsPrivate(ctx),
+		private: private,
+		done:    make(chan struct{}),
 	}
 	s.armRefresh()
 	s.armAbandon()
 	return s, nil
 }
+
+func (s *Stream) Done() <-chan struct{} { return s.done }
 
 func (s *Stream) Write(p []byte) (int, error) {
 	s.mu.Lock()
@@ -383,6 +417,7 @@ func (s *Stream) Close() error {
 	}
 	text := string(s.buf)
 	gaveUp := s.gaveUp
+	close(s.done)
 	s.mu.Unlock()
 	defer s.t.streamMu.Unlock()
 
