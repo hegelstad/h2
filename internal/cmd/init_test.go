@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"h2/internal/config"
+	"h2/internal/socketdir"
 )
 
 func extractClaudeAllowedCommands(t *testing.T, settingsPath string) []string {
@@ -81,16 +82,47 @@ func expectedDirs() []string {
 	}
 }
 
-// setupFakeHome isolates tests from the real filesystem by setting HOME,
-// H2_ROOT_DIR, and H2_DIR to temp directories. Returns the fake home dir.
+// setupFakeHome isolates tests from the real filesystem by setting HOME
+// to a temp dir and H2_DIR to a marked temp h2 directory that is not
+// HOME/.h2 (so `h2 init --global` can still create ~/.h2). It fails the
+// test if ResolveDir still points at the host config dir.
 func setupFakeHome(t *testing.T) string {
 	t.Helper()
 	fakeHome := t.TempDir()
-	fakeRootDir := filepath.Join(fakeHome, ".h2")
+	isolated := filepath.Join(fakeHome, "isolated-h2")
+	if err := os.MkdirAll(isolated, 0o755); err != nil {
+		t.Fatalf("create isolated h2 dir: %v", err)
+	}
+	if err := config.WriteMarker(isolated); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
 	t.Setenv("HOME", fakeHome)
-	t.Setenv("H2_ROOT_DIR", fakeRootDir)
-	t.Setenv("H2_DIR", "")
+	t.Setenv("H2_ROOT_DIR", filepath.Join(fakeHome, ".h2"))
+	t.Setenv("H2_DIR", isolated)
+	config.ResetResolveCache()
+	socketdir.ResetDirCache()
+	t.Cleanup(func() {
+		config.ResetResolveCache()
+		socketdir.ResetDirCache()
+	})
+	if err := config.CheckTestIsolation(); err != nil {
+		t.Fatal(err)
+	}
 	return fakeHome
+}
+
+func TestSetupFakeHome_DoesNotResolveToHost(t *testing.T) {
+	fakeHome := setupFakeHome(t)
+	dir, err := config.ResolveDir()
+	if err != nil {
+		t.Fatalf("ResolveDir after setupFakeHome: %v", err)
+	}
+	if !strings.HasPrefix(dir, fakeHome) {
+		t.Fatalf("ResolveDir() = %s, want under fake home %s (must not walk up into the real H2_DIR)", dir, fakeHome)
+	}
+	if err := config.CheckTestIsolation(); err != nil {
+		t.Fatalf("setupFakeHome left tests pointing at the host config dir: %v", err)
+	}
 }
 
 func TestInitCmd_CreatesStructure(t *testing.T) {
