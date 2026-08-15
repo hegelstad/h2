@@ -5,8 +5,8 @@
 Outbound Telegram no longer has a `--format` flag. Every send goes through
 Bot API 10.1 rich messages. A draft is **not** a message: `sendRichMessageDraft`
 returns `True` and expires in 30 seconds. Persistence is always
-`sendRichMessage`. `editMessageText` revises an already-persisted message; it
-cannot finalize a draft.
+`sendRichMessage`. `editMessageText` is the v2 revision hook; it cannot
+finalize a draft and is not called in v1.
 
 Plain `sendMessage` is retained only as a failure fallback, with the original
 unmodified text. Losing a user-visible message because rich failed is the
@@ -24,12 +24,10 @@ flowchart LR
   TG --> R["richhtml.Render"]
   TG --> Draft["sendRichMessageDraft"]
   TG --> Persist["sendRichMessage"]
-  TG --> Edit["editMessageText"]
   TG --> Plain["sendMessage fallback"]
   Draft -.->|genuine API error| Plain
   Draft -.->|not a private chat| Persist
   Persist -.->|genuine API error| Plain
-  Edit -.->|genuine API error| Plain
 ```
 
 ```mermaid
@@ -78,7 +76,6 @@ stateDiagram-v2
   Streaming --> Persisted: not private — skip drafts, persist
   Streaming --> Fallback: genuine draft/persist API error
   Fallback --> [*]: sendMessage original text
-  Persisted --> Revised: editMessageText (later)
   Persisted --> [*]
 ```
 
@@ -96,8 +93,9 @@ draft as an editable message.
    A non-private target means **skip drafts and persist** — that is not a
    failure and must not trigger the plain-text fallback. Only a genuine
    API error on `sendRichMessage` does.
-3. `editMessageText` accepts `rich_message` and a real `message_id`. Correct
-   for revising a persisted message. Wrong for finalizing a draft.
+3. `editMessageText` accepts `rich_message` and a real `message_id`. That is
+   the v2 extension point for revising a persisted message. It cannot
+   finalize a draft. v1 does not call it.
 4. `InputRichMessage`: exactly one of `html`, `markdown`, `blocks`. We emit
    `html` only. Optional extras: `media` (ignored — we are not doing
    media), `is_rtl` (unset), `skip_entity_detection` (**always `true`**,
@@ -153,16 +151,28 @@ Markdown):
 | Lines matching `^\d+[.)] ` | `<ol><li>…</li></ol>` |
 | Fenced ` ```lang ` … ` ``` ` | `<pre><code class="language-lang">…</code></pre>` |
 
-Non-goals (leave as paragraph text): ATX headings, thematic breaks, inline
-`*bold*` / `` `code` ``, tables, blockquotes. Do not grow this into a Markdown
-parser unless a later design says so.
+Inline forms on text runs only (after structure, after escaping), never
+inside a fenced block. Two bounded regexes, not a Markdown parser:
+
+| Input | Output |
+| --- | --- |
+| `` `code` `` | `<code>code</code>` |
+| `**bold**` | `<b>bold</b>` |
+
+Unmatched delimiters stay literal (odd number of backticks, a lone
+`**`, an unclosed backtick). Nothing else is recognized: no `*italic*`,
+no `__bold__`, no `***`.
+
+Non-goals (leave as paragraph text): ATX headings, thematic breaks,
+tables, blockquotes. Do not grow this into a Markdown parser.
 
 Text-run escaping:
 
 1. Emit only tags from the documented rich-html set (never `<div>`).
 2. Escape raw `&`, `<`, `>` in text runs **after** structure is decided, so
    renderer-owned tags stay intact.
-3. Legal named entities pass through. Any other `&name;` is rewritten to
+3. Then apply the two inline forms on those escaped text runs only.
+4. Legal named entities pass through. Any other `&name;` is rewritten to
    `&#N;` via a bundled HTML5 named-character map; unknown names become
    `&amp;name;`.
 
@@ -195,13 +205,25 @@ func (s *Stream) Close() error                // persist; fallback on error
 Stable for the life of one `Stream`. Distinct for the next `OpenStream`.
 Not a second-resolution timestamp.
 
-Draft flush policy:
+Draft flush policy (200ms is a **floor**, not an extra trigger):
 
-- Flush on newline or every 200ms of new bytes, whichever first.
+- Flush when there is new content **and** at least 200ms has passed since
+  the last draft call. A newline is a hint that a flush is worthwhile,
+  never a reason to go faster than the floor. A burst of 100 short lines
+  produces a bounded number of draft calls, not 100.
 - If the stream stays open with no new bytes, refresh the **same**
   `draft_id` with the last HTML at 20s so the 30s preview does not expire.
 - Draft HTML may include `<tg-thinking>…</tg-thinking>` (truncated tail or
   a fixed "generating" marker). The persist call never includes it.
+
+Streams are serialized per `Telegram` with a mutex. A second
+`OpenStream` waits until the first `Close` (or abandon) finishes. Two
+agents cannot animate two live drafts in the same private chat at once.
+
+Abandoned streams: if 60s pass with no `Write`, `bridgeservice` closes
+the stream through the **normal persist path** (`sendRichMessage`) so the
+user still gets the content, and logs that it was abandoned. The 60s
+timer uses the same fake clock as the 20s refresh.
 
 Private vs not-private is decided at `OpenStream` (`getChat`, or a cached
 type from inbound updates). If the chat is not private, `Write` does not
@@ -228,11 +250,11 @@ func (t *Telegram) sendRichMessage(ctx context.Context, html string) (messageID 
 Every `InputRichMessage` we send sets `skip_entity_detection: true`
 (package-level constant). No `media`, no `is_rtl`.
 
-`editMessageText` is an internal method (`EditRich(ctx, messageID, text)`)
-used to revise a persisted message. v1 CLI does not expose it; `Send` /
-`Stream.Close` store the last persisted `message_id` on `Telegram` so a later
-caller can revise. Do not invent a `--format` or `--edit` flag in this
-change.
+v1 does not store `message_id` on `Telegram` and does not expose
+`EditRich`. A shared bridge would race two agents' ids. The user's
+"same message remains rich" requirement is already satisfied by
+`sendRichMessage`. `editMessageText` is the documented v2 extension
+point only.
 
 ### Socket protocol — `internal/session/message` + `internal/bridgeservice`
 
@@ -280,7 +302,7 @@ config dir (`setupFakeHome` / `config.CheckTestIsolation` from PR #9).
 
 | What | Where | Runner |
 | --- | --- | --- |
-| Renderer table (paragraphs, `<br>`, ul/ol, fences, escaping, entities, limits, no `<div>`) | `internal/bridge/richhtml/render_test.go` | `make test` |
+| Renderer table (paragraphs, `<br>`, ul/ol, fences, `` `code` `` / `**bold**`, unmatched delimiters, escaping, entities, limits, no `<div>`) | `internal/bridge/richhtml/render_test.go` | `make test` |
 | Property: every escaped text run round-trips through a tiny unescape of the legal set | `internal/bridge/richhtml/render_test.go` | `make test` |
 | httptest Bot API: one-shot calls **only** `sendRichMessage` with `rich_message.html` | `internal/bridge/telegram/rich_test.go` | `make test` |
 | httptest: stream is `N × sendRichMessageDraft` (same non-zero `draft_id`) then one `sendRichMessage` | `internal/bridge/telegram/rich_test.go` | `make test` |
@@ -290,6 +312,9 @@ config dir (`setupFakeHome` / `config.CheckTestIsolation` from PR #9).
 | One-shot never emits a draft | `internal/bridge/telegram/rich_test.go` | `make test` |
 | `draft_id == 0` never sent | `internal/bridge/telegram/rich_test.go` | `make test` |
 | Persist HTML never contains `<tg-thinking>` | `internal/bridge/telegram/rich_test.go` | `make test` |
+| Burst of 100 short lines produces a bounded number of draft calls (200ms floor) | `internal/bridge/telegram/rich_test.go` | `make test` |
+| 60s idle abandon persists via `sendRichMessage` and logs abandoned (fake clock) | `internal/bridge/telegram/rich_test.go` | `make test` |
+| Second `OpenStream` waits until the first stream closes (serialize) | `internal/bridge/telegram/rich_test.go` | `make test` |
 | `--stdin` on a TTY errors; `--stdin` from a pipe drives stream types | `internal/cmd/send_test.go` | `make test` |
 | `sendOutbound` still one-shots `Sender.Send` (no format field) | `internal/bridgeservice/service_test.go` | `make test` |
 
@@ -299,7 +324,8 @@ config dir (`setupFakeHome` / `config.CheckTestIsolation` from PR #9).
 
 - Fallback is total: every rich error path is a named test, not a shared
   helper that could skip a case.
-- Draft refresh at 20s is tested with a fake clock, not a 20s sleep.
+- Draft refresh at 20s and abandon at 60s are tested with a fake clock,
+  not real sleeps.
 - Renderer refuses to emit unsupported tags (`<div>` included) via a
   denylist assertion on every table case's output.
 - `draft_id` generator is tested across wrap (skip 0).
@@ -310,4 +336,5 @@ config dir (`setupFakeHome` / `config.CheckTestIsolation` from PR #9).
 - `--format` in any form.
 - Full Markdown / CommonMark.
 - Fake streaming by chunking a complete `--file` body.
-- Revising a persisted message from the CLI (internal method only in v1).
+- Revising a persisted message (`editMessageText` is v2 only).
+- Concurrent live drafts in one chat (streams are serialized per bridge).
