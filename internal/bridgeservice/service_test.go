@@ -1739,3 +1739,48 @@ func TestHandleInbound_ExpectsResponse_TriggerFailStillDelivers(t *testing.T) {
 		t.Errorf("send body = %q, want 'hello despite trigger fail'", sendReq.Body)
 	}
 }
+
+type mockStream struct {
+	writes []string
+	closed bool
+}
+
+func (m *mockStream) Write(p []byte) (int, error) {
+	m.writes = append(m.writes, string(p))
+	return len(p), nil
+}
+func (m *mockStream) Close() error { m.closed = true; return nil }
+
+type mockStreamer struct {
+	mockSender
+	opened *mockStream
+}
+
+func (m *mockStreamer) OpenStream(_ context.Context) (bridge.MessageStream, error) {
+	m.opened = &mockStream{}
+	return m.opened, nil
+}
+
+func TestSendStream_OpenWriteClose(t *testing.T) {
+	st := &mockStreamer{mockSender: mockSender{name: "tg"}}
+	svc := New([]bridge.Bridge{st}, "alice", "concierge", "", t.TempDir(), nil)
+
+	open := svc.handleStreamOpen(&message.Request{Type: "send_stream_open", From: "concierge"})
+	if !open.OK || open.StreamID == "" {
+		t.Fatalf("open = %+v", open)
+	}
+	write := svc.handleStreamWrite(&message.Request{Type: "send_stream_write", StreamID: open.StreamID, Body: "hello"})
+	if !write.OK {
+		t.Fatalf("write = %+v", write)
+	}
+	closeResp := svc.handleStreamClose(&message.Request{Type: "send_stream_close", StreamID: open.StreamID})
+	if !closeResp.OK {
+		t.Fatalf("close = %+v", closeResp)
+	}
+	if !st.opened.closed {
+		t.Fatal("stream not closed")
+	}
+	if len(st.opened.writes) != 1 || st.opened.writes[0] != "hello" {
+		t.Fatalf("writes = %v", st.opened.writes)
+	}
+}

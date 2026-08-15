@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"h2/internal/bridge"
@@ -45,6 +46,11 @@ type Telegram struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	offset int64
+
+	clock    clock
+	draftSeq atomic.Int64
+	streamMu sync.Mutex
+	chatType string
 }
 
 func (t *Telegram) Name() string { return "telegram" }
@@ -60,19 +66,6 @@ func (t *Telegram) apiURL(method string) string {
 		base = "https://api.telegram.org"
 	}
 	return fmt.Sprintf("%s/bot%s/%s", base, t.Token, method)
-}
-
-// Send posts a text message to the configured chat. Messages longer than
-// Telegram's 4096-character limit are split into multiple messages at line
-// boundaries when possible, up to maxPages messages.
-func (t *Telegram) Send(ctx context.Context, text string) error {
-	chunks := bridge.SplitMessage(text, maxMessageLen, maxPages)
-	for _, chunk := range chunks {
-		if err := t.sendChunk(ctx, chunk); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (t *Telegram) sendChunk(ctx context.Context, text string) error {

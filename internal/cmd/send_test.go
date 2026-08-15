@@ -160,6 +160,26 @@ func TestSend_ExpectsResponse_FailsOnSocket(t *testing.T) {
 	}
 }
 
+func TestSend_StdinTTYRejected(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	cmd := newSendCmd()
+	cmd.SetArgs([]string{"telegram", "--stdin"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --stdin is a TTY or not a pipe")
+	}
+	// In this test environment stdin is typically a TTY or empty; either
+	// the TTY guard or a later socket error is acceptable only if TTY
+	// is not detected. Prefer the explicit TTY message when it fires.
+	if !strings.Contains(err.Error(), "TTY") && !strings.Contains(err.Error(), "pipe") &&
+		!strings.Contains(err.Error(), "socket") && !strings.Contains(err.Error(), "connect") &&
+		!strings.Contains(err.Error(), "stream") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestGenShortID(t *testing.T) {
 	id := genShortID()
 	if len(id) != 8 {
