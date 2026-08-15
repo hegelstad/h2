@@ -3,8 +3,8 @@ package bridge
 import "context"
 
 // Streamer is the capability for bridges that can stream a message as
-// incremental drafts and then persist it. Telegram implements this via
-// sendMessageDraft + sendMessage.
+// incremental writes and then persist once on Close. Telegram
+// implements this as an in-memory buffer plus one sendMessage.
 type Streamer interface {
 	OpenStream(ctx context.Context) (MessageStream, error)
 }

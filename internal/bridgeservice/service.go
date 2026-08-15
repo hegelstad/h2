@@ -45,10 +45,6 @@ type Service struct {
 
 	streams map[string]*liveStream
 
-	thinking      bool
-	thinkingSince time.Time
-	sawActive     bool
-
 	mu sync.Mutex
 }
 
@@ -231,40 +227,11 @@ func (s *Service) handleInbound(targetAgent, body string) {
 	} else {
 		s.mu.Lock()
 		s.lastRoutedAgent = target
-		s.thinking = true
-		s.thinkingSince = time.Now()
-		s.sawActive = false
 		s.mu.Unlock()
-		go s.showThinking()
-	}
-}
-
-// replyError sends an error message back to all Sender bridges.
-func (s *Service) showThinking() {
-	ctx := context.Background()
-	for _, b := range s.bridges {
-		if tp, ok := b.(bridge.ThinkingPreview); ok {
-			if err := tp.ShowThinking(ctx); err != nil {
-				log.Printf("bridge: thinking preview via %s: %v", b.Name(), err)
-			}
-		}
-	}
-}
-
-func (s *Service) stopThinking() {
-	s.mu.Lock()
-	s.thinking = false
-	s.sawActive = false
-	s.mu.Unlock()
-	for _, b := range s.bridges {
-		if tp, ok := b.(bridge.ThinkingPreview); ok {
-			tp.StopThinking()
-		}
 	}
 }
 
 func (s *Service) replyError(msg string) {
-	s.stopThinking()
 	ctx := context.Background()
 	for _, b := range s.bridges {
 		if sender, ok := b.(bridge.Sender); ok {
@@ -641,35 +608,10 @@ func (s *Service) runTypingLoop(ctx context.Context) {
 				continue
 			}
 			state, err := s.queryAgentStateFn(typingTarget)
-			s.mu.Lock()
-			thinking := s.thinking
-			since := s.thinkingSince
-			s.mu.Unlock()
-			if thinking {
-				if err == nil && state == "active" {
-					s.mu.Lock()
-					s.sawActive = true
-					s.mu.Unlock()
-				}
-				if err != nil || state == "idle" {
-					s.mu.Lock()
-					saw := s.sawActive
-					s.mu.Unlock()
-					if saw || time.Since(since) > 60*time.Second {
-						s.stopThinking()
-					}
-				}
-				continue
-			}
 			if err != nil || state != "active" {
 				continue
 			}
-			// No inbound thinking yet (e.g. work started another way):
-			// keep the old typing indicator for non-ThinkingPreview bridges.
 			for _, b := range s.bridges {
-				if _, ok := b.(bridge.ThinkingPreview); ok {
-					continue
-				}
 				if ti, ok := b.(bridge.TypingIndicator); ok {
 					if err := ti.SendTyping(ctx); err != nil {
 						log.Printf("bridge: typing indicator via %s: %v", b.Name(), err)

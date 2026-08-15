@@ -46,12 +46,7 @@ type Telegram struct {
 	mu     sync.Mutex
 	offset int64
 
-	clock    clock
 	streamMu sync.Mutex
-	chatType string
-
-	thinking         bool
-	stopThinkRefresh func()
 }
 
 func (t *Telegram) Name() string { return "telegram" }

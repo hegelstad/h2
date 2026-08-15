@@ -632,59 +632,24 @@ func TestResolveDefaultTarget_NoAgents(t *testing.T) {
 
 // --- Typing loop tests ---
 
-type mockThinkingBridge struct {
-	mockTypingBridge
-	thinkCalls int
-}
-
-func (m *mockThinkingBridge) ShowThinking(_ context.Context) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.thinkCalls++
-	return nil
-}
-
-func (m *mockThinkingBridge) ThinkCalls() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.thinkCalls
-}
-
-func (m *mockThinkingBridge) StopThinking() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.thinkCalls = 0
-}
-
-func TestInbound_StartsThinkingImmediately(t *testing.T) {
+func TestInbound_SetsLastRoutedAgent(t *testing.T) {
 	tmpDir := shortTempDir(t)
 	_ = newMockStatusAgent(t, tmpDir, "concierge", "idle")
 
-	tb := &mockThinkingBridge{mockTypingBridge: mockTypingBridge{name: "telegram"}}
+	tb := &mockTypingBridge{name: "telegram"}
 	svc := New([]bridge.Bridge{tb}, "alice", "concierge", "", tmpDir, nil)
-
-	// sendToAgent will fail (no real agent listener for send) — use a
-	// reachable status socket plus a stub by calling showThinking via
-	// a successful route. Probe: handleInbound with empty target uses
-	// concierge; sendToAgent may fail. Drive the start hook directly
-	// the same way handleInbound does after a successful send.
 	svc.mu.Lock()
 	svc.lastRoutedAgent = "concierge"
-	svc.thinking = true
-	svc.thinkingSince = time.Now()
 	svc.mu.Unlock()
-	svc.showThinking()
 
-	if tb.ThinkCalls() != 1 {
-		t.Fatalf("expected 1 thinking preview on inbound, got %d", tb.ThinkCalls())
-	}
 	if tb.TypingCalls() != 0 {
-		t.Fatalf("did not want typing, got %d", tb.TypingCalls())
+		t.Fatalf("inbound must not fire typing itself, got %d", tb.TypingCalls())
 	}
-
-	svc.stopThinking()
-	if tb.ThinkCalls() != 0 {
-		t.Fatalf("StopThinking should clear, got %d", tb.ThinkCalls())
+	svc.mu.Lock()
+	got := svc.lastRoutedAgent
+	svc.mu.Unlock()
+	if got != "concierge" {
+		t.Fatalf("lastRoutedAgent = %q", got)
 	}
 }
 

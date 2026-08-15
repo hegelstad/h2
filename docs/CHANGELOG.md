@@ -23,11 +23,13 @@
   image/file handling is accepted.
 - **Telegram chat HTML (not rich documents)**: `h2 send` to Telegram
   persists via `sendMessage` + `parse_mode=HTML` so replies look like
-  normal chat bubbles. `sendMessageDraft` with empty text shows
-  “Thinking…”; `--stdin` streams the same regular draft, then
-  persists with `sendMessage`. Rich-only tags (`<p>`, `<ul>`, …) are
-  downconverted. `sendRichMessage` is not used. No `--format` flag.
-  If HTML is rejected, the original text is sent plain.
+  normal chat bubbles. While the target agent is active, the bridge
+  refreshes the classic blue typing indicator (`sendChatAction`)
+  every 4s. There is no Thinking preview and no `sendMessageDraft`.
+  `--stdin` buffers and sends one `sendMessage` on close. Rich-only
+  tags (`<p>`, `<ul>`, …) are downconverted. `sendRichMessage` is
+  not used. No `--format` flag. If HTML is rejected, the original
+  text is sent plain.
 
 ### Bug Fixes
 
