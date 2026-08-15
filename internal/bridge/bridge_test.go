@@ -70,6 +70,40 @@ func TestValidateRichHTML(t *testing.T) {
 			text:    "<b>bold</b> and <code>code</code>",
 			wantErr: false,
 		},
+		{
+			// <div> is not a supported rich-html tag. A body whose only
+			// structure is <div> would still render as a wall of text.
+			name:    "newlines plus unsupported div",
+			text:    "<div>hello</div>\n<div>world</div>",
+			wantErr: true,
+		},
+		{
+			// Hyphenated tg-* tags must match as a whole name. A word-
+			// boundary regex would split on the hyphen and miss these.
+			name:    "newlines plus tg-collage",
+			text:    "<tg-collage>\n<img src=\"https://example.com/a.jpg\"/>\n</tg-collage>",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus tg-slideshow",
+			text:    "<tg-slideshow>\n<img src=\"https://example.com/a.jpg\"/>\n</tg-slideshow>",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus tg-math-block",
+			text:    "<tg-math-block>\nE = mc^2\n</tg-math-block>",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus aside",
+			text:    "<aside>pull quote</aside>\nmore",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus details summary",
+			text:    "<details>\n<summary>title</summary>\ncontent\n</details>",
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

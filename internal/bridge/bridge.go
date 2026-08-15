@@ -67,18 +67,28 @@ func IsRichFormat(format string) (markup string, ok bool) {
 	}
 }
 
-// richHTMLBlockTagRe matches an opening block-level HTML tag (case-insensitive).
-// Telegram sendRichMessage collapses raw newlines to spaces, so a rich-html
-// body needs at least one of these to keep line structure. This is a
-// substring/opening-tag check, not a full HTML parse: a tag-lookalike in
-// prose such as "use <br> to break" counts as a block tag.
-var richHTMLBlockTagRe = regexp.MustCompile(`(?i)<(p|br|h[1-6]|ul|ol|li|blockquote|table|tr|td|th|pre|div|hr)(\s|/|>)`)
+// richHTMLBlockTagRe matches an opening block-level HTML tag from the
+// documented Telegram rich-html set (case-insensitive). Hyphenated
+// tg-* names are matched as whole tags (not via \b, which would split
+// on the hyphen). <div> is intentionally absent: it is not supported.
+// This is a substring/opening-tag check, not a full HTML parse: a
+// tag-lookalike in prose such as "use <br> to break" counts as a block tag.
+var richHTMLBlockTagRe = regexp.MustCompile(`(?i)<(p|br|h[1-6]|ul|ol|li|blockquote|aside|pre|hr|table|tr|td|th|caption|details|summary|figure|figcaption|footer|tg-collage|tg-slideshow|tg-math-block)(\s|/|>)`)
 
 // ValidateRichHTML reports whether a rich-html body will keep its line
 // structure when Telegram parses it as HTML. If text contains a newline
-// and no block-level opening tag, it returns a descriptive error.
+// and no documented block-level opening tag, it returns a descriptive error.
 // Otherwise it returns nil. The CLI calls this before delivery; there is
 // no silent rewrite of the body.
+//
+// Telegram's own HTML example in Bot API "Rich HTML style" ends with
+// "all the text above was on the same line", stating outright that raw
+// newlines do not break lines. Only the tags listed there are supported;
+// <div> is not among them.
+//
+// Named HTML entities are restricted to &lt; &gt; &amp; &quot; &apos;
+// &nbsp; &hellip; &mdash; &ndash; &lsquo; &rsquo; &ldquo; &rdquo;.
+// Everything else must be numeric. This helper does not validate entities.
 func ValidateRichHTML(text string) error {
 	if !strings.Contains(text, "\n") {
 		return nil
