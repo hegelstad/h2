@@ -3,10 +3,12 @@ package cmd
 import (
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
 
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"h2/internal/session/message"
@@ -20,11 +22,13 @@ func newSendCmd() *cobra.Command {
 	var raw bool
 	var expectsResponse bool
 	var respondsTo string
+	var stdin bool
 
 	cmd := &cobra.Command{
-		Use:   "send [<name>] [--priority=normal] [--file=path] [--raw] [--expects-response] [--closes=<id>] [message...]",
+		Use:   "send [<name>] [--priority=normal] [--file=path] [--stdin] [--raw] [--expects-response] [--closes=<id>] [message...]",
 		Short: "Send a message to an agent",
 		Long: `Send a message to a running agent. The message body can be provided as arguments or read from a file.
+With --stdin, the body is streamed from standard input (error if stdin is a TTY).
 With --raw, the body is sent directly to the agent's PTY without the header prefix.
 With --expects-response, a reminder trigger is registered on the recipient that fires at idle.
 With --closes <id>, the reminder trigger is removed from your own daemon (and optionally a response is sent).`,
@@ -40,6 +44,10 @@ With --closes <id>, the reminder trigger is removed from your own daemon (and op
 				return fmt.Errorf("target agent name is required")
 			}
 			name := args[0]
+
+			if stdin {
+				return handleStdinSend(name, allowSelf)
+			}
 
 			var body string
 			if file != "" {
@@ -131,12 +139,72 @@ With --closes <id>, the reminder trigger is removed from your own daemon (and op
 
 	cmd.Flags().StringVar(&priority, "priority", "normal", "Message priority (interrupt|normal|idle-first|idle)")
 	cmd.Flags().StringVar(&file, "file", "", "Read message body from file")
+	cmd.Flags().BoolVar(&stdin, "stdin", false, "Stream the body from stdin (not a TTY)")
 	cmd.Flags().BoolVar(&allowSelf, "allow-self", false, "Allow sending a message to yourself")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Send body directly to PTY without header prefix (useful for permission prompts)")
 	cmd.Flags().BoolVar(&expectsResponse, "expects-response", false, "Register an idle reminder trigger on the recipient")
 	cmd.Flags().StringVar(&respondsTo, "closes", "", "Close a reminder trigger by ID (and optionally send a response)")
 
 	return cmd
+}
+
+func handleStdinSend(name string, allowSelf bool) error {
+	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		return fmt.Errorf("--stdin requires a pipe; refusing to read a TTY")
+	}
+	from := resolveActor()
+	if !allowSelf {
+		if actor := os.Getenv("H2_ACTOR"); actor != "" && actor == name {
+			return fmt.Errorf("cannot send a message to yourself (%s); use --allow-self to override", name)
+		}
+	}
+	open, err := sendSocketRequest(name, &message.Request{Type: "send_stream_open", From: from})
+	if err != nil {
+		return err
+	}
+	if !open.OK {
+		return fmt.Errorf("stream open: %s", open.Error)
+	}
+	streamID := open.StreamID
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := os.Stdin.Read(buf)
+		if n > 0 {
+			resp, werr := sendSocketRequest(name, &message.Request{
+				Type:     "send_stream_write",
+				From:     from,
+				Body:     string(buf[:n]),
+				StreamID: streamID,
+			})
+			if werr != nil {
+				return werr
+			}
+			if !resp.OK {
+				return fmt.Errorf("stream write: %s", resp.Error)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read stdin: %w", readErr)
+		}
+	}
+	closeResp, err := sendSocketRequest(name, &message.Request{
+		Type:     "send_stream_close",
+		From:     from,
+		StreamID: streamID,
+	})
+	if err != nil {
+		return err
+	}
+	if !closeResp.OK {
+		return fmt.Errorf("stream close: %s", closeResp.Error)
+	}
+	if closeResp.MessageID != "" {
+		fmt.Println(closeResp.MessageID)
+	}
+	return nil
 }
 
 // registerExpectsResponseTrigger registers an idle reminder trigger on the

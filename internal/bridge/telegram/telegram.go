@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"h2/internal/bridge"
@@ -45,6 +47,11 @@ type Telegram struct {
 	wg     sync.WaitGroup
 	mu     sync.Mutex
 	offset int64
+
+	clock    clock
+	draftSeq atomic.Int64
+	streamMu sync.Mutex
+	chatType string
 }
 
 func (t *Telegram) Name() string { return "telegram" }
@@ -62,24 +69,19 @@ func (t *Telegram) apiURL(method string) string {
 	return fmt.Sprintf("%s/bot%s/%s", base, t.Token, method)
 }
 
-// Send posts a text message to the configured chat. Messages longer than
-// Telegram's 4096-character limit are split into multiple messages at line
-// boundaries when possible, up to maxPages messages.
-func (t *Telegram) Send(ctx context.Context, text string) error {
-	chunks := bridge.SplitMessage(text, maxMessageLen, maxPages)
-	for _, chunk := range chunks {
-		if err := t.sendChunk(ctx, chunk); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (t *Telegram) sendChunk(ctx context.Context, text string) error {
-	resp, err := t.client.PostForm(t.apiURL("sendMessage"), url.Values{
+	ctx, cancel := withAPITimeout(ctx)
+	defer cancel()
+	form := url.Values{
 		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
 		"text":    {text},
-	})
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("telegram send: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := t.sendHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram send: %w", err)
 	}

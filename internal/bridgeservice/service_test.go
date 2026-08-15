@@ -1739,3 +1739,91 @@ func TestHandleInbound_ExpectsResponse_TriggerFailStillDelivers(t *testing.T) {
 		t.Errorf("send body = %q, want 'hello despite trigger fail'", sendReq.Body)
 	}
 }
+
+type mockStream struct {
+	writes []string
+	closed bool
+	done   chan struct{}
+}
+
+func newMockStream() *mockStream {
+	return &mockStream{done: make(chan struct{})}
+}
+
+func (m *mockStream) Write(p []byte) (int, error) {
+	m.writes = append(m.writes, string(p))
+	return len(p), nil
+}
+func (m *mockStream) Close() error {
+	if !m.closed {
+		m.closed = true
+		close(m.done)
+	}
+	return nil
+}
+func (m *mockStream) Done() <-chan struct{} { return m.done }
+
+type mockStreamer struct {
+	mockSender
+	opened *mockStream
+}
+
+func (m *mockStreamer) OpenStream(_ context.Context) (bridge.MessageStream, error) {
+	m.opened = newMockStream()
+	return m.opened, nil
+}
+
+func TestSendStream_OpenWriteClose(t *testing.T) {
+	st := &mockStreamer{mockSender: mockSender{name: "tg"}}
+	svc := New([]bridge.Bridge{st}, "alice", "concierge", "", t.TempDir(), nil)
+
+	open := svc.handleStreamOpen(&message.Request{Type: "send_stream_open", From: "concierge"})
+	if !open.OK || open.StreamID == "" {
+		t.Fatalf("open = %+v", open)
+	}
+	write := svc.handleStreamWrite(&message.Request{Type: "send_stream_write", StreamID: open.StreamID, Body: "hello"})
+	if !write.OK {
+		t.Fatalf("write = %+v", write)
+	}
+	closeResp := svc.handleStreamClose(&message.Request{Type: "send_stream_close", StreamID: open.StreamID})
+	if !closeResp.OK {
+		t.Fatalf("close = %+v", closeResp)
+	}
+	if !st.opened.closed {
+		t.Fatal("stream not closed")
+	}
+	if len(st.opened.writes) != 1 || st.opened.writes[0] != "hello" {
+		t.Fatalf("writes = %v", st.opened.writes)
+	}
+}
+
+func TestSendStream_AbandonClearsMap(t *testing.T) {
+	st := &mockStreamer{mockSender: mockSender{name: "tg"}}
+	svc := New([]bridge.Bridge{st}, "alice", "concierge", "", t.TempDir(), nil)
+
+	open := svc.handleStreamOpen(&message.Request{Type: "send_stream_open", From: "concierge"})
+	if !open.OK {
+		t.Fatalf("open = %+v", open)
+	}
+	svc.mu.Lock()
+	n := len(svc.streams)
+	svc.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("streams after open = %d", n)
+	}
+	// Telegram-layer abandon closes the stream without handleStreamClose.
+	if err := st.opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		svc.mu.Lock()
+		n = len(svc.streams)
+		svc.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("stream map leaked after abandon, n=%d", n)
+}
