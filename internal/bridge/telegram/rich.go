@@ -112,6 +112,39 @@ type sendRichResponse struct {
 	} `json:"result"`
 }
 
+type editRichRequest struct {
+	ChatID      int64            `json:"chat_id"`
+	MessageID   int64            `json:"message_id"`
+	RichMessage inputRichMessage `json:"rich_message"`
+}
+
+func (t *Telegram) sendEditRich(ctx context.Context, messageID int64, html string) error {
+	body, err := json.Marshal(editRichRequest{
+		ChatID:    t.ChatID,
+		MessageID: messageID,
+		RichMessage: inputRichMessage{
+			HTML:                html,
+			SkipEntityDetection: skipEntityDetection,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("telegram editMessageText: marshal: %w", err)
+	}
+	resp, err := t.postJSON(ctx, "editMessageText", body)
+	if err != nil {
+		return fmt.Errorf("telegram editMessageText: %w", err)
+	}
+	defer resp.Body.Close()
+	var result apiResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("telegram editMessageText: decode: %w", err)
+	}
+	if !result.OK {
+		return fmt.Errorf("telegram editMessageText: API error: %s", result.Description)
+	}
+	return nil
+}
+
 func (t *Telegram) sendRichMessage(ctx context.Context, html string) (messageID int64, err error) {
 	body, err := json.Marshal(sendRichRequest{
 		ChatID: t.ChatID,
@@ -238,6 +271,9 @@ type Stream struct {
 	dirty       bool
 	closed      bool
 	gaveUp      bool // genuine draft error → persist skipped, plain fallback
+	drafted     bool // at least one successful sendRichMessageDraft
+	persisted   bool
+	messageID   int64
 	stopRefresh func()
 	stopFlush   func()
 	stopAbandon func()
@@ -274,11 +310,11 @@ func (s *Stream) Write(p []byte) (int, error) {
 	s.buf = append(s.buf, p...)
 	s.dirty = true
 	s.armAbandonLocked()
-	if !s.private || s.gaveUp {
+	if s.gaveUp {
 		return len(p), nil
 	}
 	if s.canFlushLocked() {
-		s.flushDraftLocked()
+		s.flushLocked()
 	} else {
 		s.scheduleFlushLocked()
 	}
@@ -307,35 +343,88 @@ func (s *Stream) scheduleFlushLocked() {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.stopFlush = nil
-		if s.closed || !s.dirty || s.gaveUp || !s.private {
+		if s.closed || !s.dirty || s.gaveUp {
 			return
 		}
-		s.flushDraftLocked()
+		s.flushLocked()
 	})
 }
 
-func (s *Stream) flushDraftLocked() {
-	html, err := richhtml.Render(string(s.buf), richhtml.Options{Thinking: true})
-	if err != nil {
-		log.Printf("telegram draft render: %v; will persist or fall back on close", err)
+// flushLocked: draft (preview) → sendRichMessage (persist, get id) →
+// editMessageText on that same message. A draft is not a message and
+// cannot be edited into permanence.
+func (s *Stream) flushLocked() {
+	if s.persisted && s.messageID != 0 {
+		html, err := richhtml.Render(string(s.buf), richhtml.Options{})
+		if err != nil {
+			log.Printf("telegram edit render: %v; will fall back on close", err)
+			s.gaveUp = true
+			s.dirty = false
+			return
+		}
+		if err := s.t.sendEditRich(s.ctx, s.messageID, html); err != nil {
+			log.Printf("telegram editMessageText: %v; will fall back on close", err)
+			s.gaveUp = true
+			s.dirty = false
+			return
+		}
+		s.lastHTML = html
+		s.lastDraftAt = s.t.clk().Now()
 		s.dirty = false
 		return
 	}
-	if err := s.t.sendRichDraft(s.ctx, s.draftID, html); err != nil {
-		if isNotPrivateDraftError(err) {
-			s.private = false
-			s.dirty = true
+	if s.persisted {
+		s.dirty = false
+		return
+	}
+	if s.private && !s.drafted {
+		html, err := richhtml.Render(string(s.buf), richhtml.Options{Thinking: true})
+		if err != nil {
+			log.Printf("telegram draft render: %v; will persist or fall back on close", err)
+			s.dirty = false
 			return
 		}
-		log.Printf("telegram sendRichMessageDraft: %v; will fall back on close", err)
+		if err := s.t.sendRichDraft(s.ctx, s.draftID, html); err != nil {
+			if isNotPrivateDraftError(err) {
+				s.private = false
+				s.dirty = true
+				return
+			}
+			log.Printf("telegram sendRichMessageDraft: %v; will fall back on close", err)
+			s.gaveUp = true
+			s.dirty = false
+			return
+		}
+		s.drafted = true
+		s.lastHTML = html
+		s.lastDraftAt = s.t.clk().Now()
+		s.dirty = false
+		s.armRefreshLocked()
+		return
+	}
+	html, err := richhtml.Render(string(s.buf), richhtml.Options{})
+	if err != nil {
+		log.Printf("telegram persist render: %v; will fall back on close", err)
 		s.gaveUp = true
 		s.dirty = false
 		return
 	}
+	id, err := s.t.sendRichMessage(s.ctx, html)
+	if err != nil {
+		log.Printf("telegram sendRichMessage: %v; will fall back on close", err)
+		s.gaveUp = true
+		s.dirty = false
+		return
+	}
+	s.persisted = true
+	s.messageID = id
 	s.lastHTML = html
 	s.lastDraftAt = s.t.clk().Now()
 	s.dirty = false
-	s.armRefreshLocked()
+	if s.stopRefresh != nil {
+		s.stopRefresh()
+		s.stopRefresh = nil
+	}
 }
 
 func (s *Stream) armRefresh() {
@@ -349,7 +438,7 @@ func (s *Stream) armRefreshLocked() {
 		s.stopRefresh()
 		s.stopRefresh = nil
 	}
-	if !s.private || s.gaveUp {
+	if !s.private || s.gaveUp || s.persisted {
 		return
 	}
 	s.stopRefresh = s.t.clk().AfterFunc(draftRefresh, func() {
@@ -417,6 +506,8 @@ func (s *Stream) Close() error {
 	}
 	text := string(s.buf)
 	gaveUp := s.gaveUp
+	persisted := s.persisted
+	messageID := s.messageID
 	close(s.done)
 	s.mu.Unlock()
 	defer s.t.streamMu.Unlock()
@@ -432,6 +523,16 @@ func (s *Stream) Close() error {
 	if err != nil {
 		log.Printf("telegram persist render: %v; falling back to sendMessage", err)
 		return s.t.sendPlain(s.ctx, text)
+	}
+	if persisted && messageID != 0 {
+		if err := s.t.sendEditRich(s.ctx, messageID, html); err != nil {
+			log.Printf("telegram editMessageText: %v; falling back to sendMessage", err)
+			return s.t.sendPlain(s.ctx, text)
+		}
+		return nil
+	}
+	if persisted {
+		return nil
 	}
 	if _, err := s.t.sendRichMessage(s.ctx, html); err != nil {
 		log.Printf("telegram sendRichMessage: %v; falling back to sendMessage", err)

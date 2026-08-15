@@ -131,7 +131,12 @@ func TestStream_DraftThenPersist(t *testing.T) {
 		case strings.HasSuffix(path, "sendRichMessageDraft"):
 			return apiResponse{OK: true}
 		case strings.HasSuffix(path, "sendRichMessage"):
-			return sendRichResponse{OK: true}
+			var r sendRichResponse
+			r.OK = true
+			r.Result.MessageID = 77
+			return r
+		case strings.HasSuffix(path, "editMessageText"):
+			return apiResponse{OK: true}
 		}
 		return apiResponse{OK: false, Description: path}
 	})
@@ -151,7 +156,7 @@ func TestStream_DraftThenPersist(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var drafts, persists int
+	var drafts, persists, edits int
 	var draftID float64
 	for _, c := range *calls {
 		switch {
@@ -173,11 +178,20 @@ func TestStream_DraftThenPersist(t *testing.T) {
 			if rm["skip_entity_detection"] != true {
 				t.Fatal("draft skip_entity_detection")
 			}
-		case strings.HasSuffix(c.Path, "sendRichMessage"):
+		case strings.HasSuffix(c.Path, "sendRichMessage") && !strings.HasSuffix(c.Path, "sendRichMessageDraft"):
 			persists++
 			rm := c.Body["rich_message"].(map[string]any)
 			if strings.Contains(rm["html"].(string), "<tg-thinking>") {
 				t.Fatal("persist must not include tg-thinking")
+			}
+		case strings.HasSuffix(c.Path, "editMessageText"):
+			edits++
+			if c.Body["message_id"] != float64(77) {
+				t.Fatalf("edit message_id = %v, want 77", c.Body["message_id"])
+			}
+			rm := c.Body["rich_message"].(map[string]any)
+			if strings.Contains(rm["html"].(string), "<tg-thinking>") {
+				t.Fatal("edit must not include tg-thinking")
 			}
 		}
 	}
@@ -186,6 +200,9 @@ func TestStream_DraftThenPersist(t *testing.T) {
 	}
 	if persists != 1 {
 		t.Fatalf("persists = %d, want 1", persists)
+	}
+	if edits != 1 {
+		t.Fatalf("edits = %d, want 1 (same message stays rich)", edits)
 	}
 }
 

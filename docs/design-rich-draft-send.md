@@ -3,10 +3,16 @@
 ## Summary
 
 Outbound Telegram no longer has a `--format` flag. Every send goes through
-Bot API 10.1 rich messages. A draft is **not** a message: `sendRichMessageDraft`
-returns `True` and expires in 30 seconds. Persistence is always
-`sendRichMessage`. `editMessageText` is the v2 revision hook; it cannot
-finalize a draft and is not called in v1.
+Bot API 10.1 rich messages. Stream path:
+
+`sendRichMessageDraft` (preview) → `sendRichMessage` (persist, get
+`message_id`) → `editMessageText(rich_message)` (same message stays
+rich).
+
+A draft is **not** a message: it returns `True` and expires in 30
+seconds. It cannot be edited into permanence. Persistence is always
+`sendRichMessage` first; later updates of that send use
+`editMessageText` with the per-stream `message_id`.
 
 Plain `sendMessage` is retained only as a failure fallback, with the original
 unmodified text. Losing a user-visible message because rich failed is the

@@ -24,12 +24,18 @@
 - **Telegram rich drafts as the default outbound path**: `h2 send` to
   Telegram now persists via `sendRichMessage` (HTML rendered from
   newlines / lists / fences / `` `code` `` / `**bold**`). `h2 send
-  --stdin` streams `sendRichMessageDraft` updates (200ms floor, 20s
-  refresh, 60s abandon-persist). Plain `sendMessage` is only used if
-  rich fails. `skip_entity_detection` is always on. No `--format`
-  flag.
+  --stdin` streams `sendRichMessageDraft` (preview), then
+  `sendRichMessage` (persist), then `editMessageText` on that same
+  message. Plain `sendMessage` is only used if rich fails.
+  `skip_entity_detection` is always on. No `--format` flag.
 
 ### Bug Fixes
+
+- **Attach first-try drop**: `ReadResponse`/`ReadRequest` no longer use
+  `json.Decoder`, which buffered past the handshake newline and could
+  swallow the first binary attach frames. First `h2 attach` after a cold
+  start then desynced and exited with no error. Handshake JSON is now
+  read one byte at a time through the terminating newline.
 
 - **Test isolation guard**: `setupFakeHome` now points `H2_DIR` at a
   temp h2 directory with a marker and fails the test if `ResolveDir`
