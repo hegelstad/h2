@@ -160,9 +160,10 @@ Profiles are reusable harness configuration bundles (auth, settings, shared inst
 
 ```text
 ~/.h2/
-├── profiles-shared/<name>/               # shared instructions + skills
+├── profiles-shared/<name>/        # shared instructions + skills
 ├── claude-config/<name>/          # Claude harness config
-└── codex-config/<name>/           # Codex harness config
+├── codex-config/<name>/           # Codex harness config
+└── grok-config/<name>/            # Grok Build harness config
 ```
 
 Use profile commands to manage them:
@@ -195,7 +196,7 @@ permissions:
       ALLOW standard dev commands. DENY destructive system ops.
 ```
 
-Each role points at a profile, which controls which `CLAUDE.md`/`AGENTS.md`, settings, hooks, and skills the agent uses. This gives you a simple way to maintain separate configurations for different use cases - a coding agent might use a different profile than a reviewer or research agent.
+Each role points at a profile, which controls which `CLAUDE.md`/`AGENTS.md`, settings, hooks, and skills the agent uses (Claude, Codex, and Grok share the same instructions and skills). This gives you a simple way to maintain separate configurations for different use cases - a coding agent might use a different profile than a reviewer or research agent.
 
 ### Pods
 

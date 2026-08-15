@@ -188,6 +188,16 @@ func CodexConfigTemplate(style string) string {
 	return string(data)
 }
 
+// GrokConfigTemplate returns the style-specific Grok Build config.toml.
+// Unknown styles fall back to opinionated.
+func GrokConfigTemplate(style string) string {
+	data, err := Templates.ReadFile(fmt.Sprintf("templates/styles/%s/grok/config.toml", normalizeTemplateStyle(style)))
+	if err != nil {
+		panic(fmt.Sprintf("embedded grok config.toml missing for style %q: %v", style, err))
+	}
+	return string(data)
+}
+
 // WriteSkillsTemplate materializes the embedded style-specific skills template
 // into targetDir. For minimal style, this intentionally results in an empty
 // directory. If force is false and targetDir is non-empty, it leaves content

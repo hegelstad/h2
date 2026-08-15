@@ -5,7 +5,7 @@ h2 configuration is organized into four layers:
 1. **Top-level config** (`config.yaml`) — global settings: bridges and per-user config
 2. **Roles** (`roles/*.yaml`) — how to launch an agent: harness, model, permissions, instructions
 3. **Pods** (`pods/*.yaml`) — sets of agents and bridges to launch together
-4. **Profiles** (`claude-config/`, `codex-config/`) — per-account harness auth and settings
+4. **Profiles** (`claude-config/`, `codex-config/`, `grok-config/`) — per-account harness auth and settings
 
 All config lives under your **h2 directory** (default `~/.h2/`, or set via `H2_DIR`).
 
@@ -29,6 +29,13 @@ All config lives under your **h2 directory** (default `~/.h2/`, or set via `H2_D
 │   ├── default/
 │   │   ├── config.toml      # API key config
 │   │   ├── requirements.toml
+│   │   └── AGENTS.md
+│   └── work/
+│       └── ...
+├── grok-config/             # Grok Build profiles
+│   ├── default/
+│   │   ├── auth.json        # xAI OIDC credentials
+│   │   ├── config.toml
 │   │   └── AGENTS.md
 │   └── work/
 │       └── ...
@@ -101,7 +108,7 @@ variables:
 agent_name: "{{ randomName }}"
 
 # --- Harness Selection ---
-agent_harness: claude_code           # claude_code | codex | generic (default: claude_code)
+agent_harness: claude_code           # claude_code | codex | grok | generic (default: claude_code)
 agent_harness_command: /path/to/claude  # Override harness binary (optional)
 agent_model: claude-sonnet-4-6       # Model override (optional; empty = harness default)
 
@@ -109,6 +116,7 @@ agent_model: claude-sonnet-4-6       # Model override (optional; empty = harness
 profile: default                     # Profile name (default: "default")
 claude_code_config_path_prefix: "{{ .H2Dir }}/claude-config"  # Optional override
 codex_config_path_prefix: "{{ .H2Dir }}/codex-config"         # Optional override
+grok_config_path_prefix: "{{ .H2Dir }}/grok-config"           # Optional override
 
 # --- Permissions & Approval ---
 claude_permission_mode: default      # Claude Code permission mode (see table below)
@@ -548,7 +556,7 @@ Launch with: `h2 pod up worker-pool` or `h2 pod up worker-pool --var num_workers
 
 ---
 
-## Profiles (`claude-config/`, `codex-config/`)
+## Profiles (`claude-config/`, `codex-config/`, `grok-config/`)
 
 Profiles store per-account harness configuration. Multiple agents can share a profile for common auth credentials and base settings, while keeping configs isolated from your personal agent setup.
 
@@ -574,11 +582,20 @@ Each agent harness has its own native config format. h2 manages these in per-pro
 │   └── AGENTS.md            # Shared instructions
 └── work/
     └── ...
+
+~/.h2/grok-config/
+├── default/
+│   ├── auth.json            # xAI OIDC credentials (`h2 auth grok`)
+│   ├── config.toml
+│   └── AGENTS.md            # Shared instructions (symlink)
+└── work/
+    └── ...
 ```
 
 h2 tells each harness where to find its config via environment variables:
 - **Claude Code**: `CLAUDE_CONFIG_DIR=<profile_dir>`
 - **Codex**: `CODEX_HOME=<profile_dir>`
+- **Grok Build**: `GROK_HOME=<profile_dir>`
 
 ### Selecting a profile
 
@@ -593,13 +610,13 @@ Default is `"default"`.
 
 ### What lives in profiles
 
-| Setting | Claude Code | Codex |
-|---------|-------------|-------|
-| Auth credentials | `.claude.json` (OAuth) | `config.toml` (API key) |
-| Tool allow/deny | `settings.json` → `permissions` | n/a |
-| Prefix rules | n/a | `requirements.toml` |
-| Hooks | `settings.json` → `hooks` | n/a |
-| Shared instructions | `CLAUDE.md` | `AGENTS.md` |
+| Setting | Claude Code | Codex | Grok Build |
+|---------|-------------|-------|------------|
+| Auth credentials | `.claude.json` (OAuth) | `config.toml` (API key) | `auth.json` (xAI OIDC) |
+| Tool allow/deny | `settings.json` → `permissions` | n/a | `config.toml` → `[permission]` / `[ui].permission_mode` |
+| Prefix rules | n/a | `requirements.toml` | n/a |
+| Hooks | `settings.json` → `hooks` | n/a | n/a (not wired into h2 yet) |
+| Shared instructions | `CLAUDE.md` | `AGENTS.md` | `AGENTS.md` |
 
 ### Why profiles instead of abstraction
 
@@ -621,6 +638,14 @@ Agents receive instructions from multiple layered sources:
 2. Profile `~/.h2/codex-config/<profile>/AGENTS.md` — shared instructions
 3. Role `instructions` — passed via `-c instructions=<json>`
 4. Project `AGENTS.md` — in working directory (auto-discovered)
+
+**Grok Build:**
+1. ~~Global `~/.grok/AGENTS.md`~~ — **not loaded** when h2 sets `GROK_HOME`
+2. Profile `~/.h2/grok-config/<profile>/AGENTS.md` — shared instructions (same file as Claude/Codex)
+3. Role `system_prompt` / `instructions` — `--system-prompt-override` / `--rules`
+4. Project `AGENTS.md` — in working directory (auto-discovered)
+
+Grok also loads `$GROK_HOME/skills`, which h2 symlinks to the shared profile skills directory.
 
 ### What to put where
 

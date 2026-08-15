@@ -387,6 +387,55 @@ func TestIsClaudeConfigAuthenticated(t *testing.T) {
 	})
 }
 
+func TestIsGrokConfigAuthenticated(t *testing.T) {
+	t.Run("authenticated with user_id", func(t *testing.T) {
+		dir := t.TempDir()
+		data := `{"https://auth.x.ai::abc":{"user_id":"u-1","email":"a@example.com"}}`
+		if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := IsGrokConfigAuthenticated(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !got {
+			t.Fatal("expected authenticated")
+		}
+	})
+	t.Run("empty accounts", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got, err := IsGrokConfigAuthenticated(dir)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got {
+			t.Fatal("expected not authenticated")
+		}
+	})
+	t.Run("missing file", func(t *testing.T) {
+		got, err := IsGrokConfigAuthenticated(t.TempDir())
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got {
+			t.Fatal("expected not authenticated when auth.json is missing")
+		}
+	})
+	t.Run("invalid json", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "auth.json"), []byte(`not-json`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := IsGrokConfigAuthenticated(dir)
+		if err == nil {
+			t.Fatal("expected parse error")
+		}
+	})
+}
+
 func TestRole_GetClaudeConfigDir(t *testing.T) {
 	ResetResolveCache()
 	t.Cleanup(ResetResolveCache)

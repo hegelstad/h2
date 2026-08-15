@@ -602,6 +602,32 @@ func (r *Role) IsRoleAuthenticated() (bool, error) {
 	return IsClaudeConfigAuthenticated(r.GetClaudeConfigDir())
 }
 
+// IsGrokConfigAuthenticated checks if the given Grok config directory has a
+// signed-in auth.json entry (user_id or email present).
+func IsGrokConfigAuthenticated(configDir string) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(configDir, "auth.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read auth.json: %w", err)
+	}
+
+	var accounts map[string]struct {
+		UserID string `json:"user_id"`
+		Email  string `json:"email"`
+	}
+	if err := json.Unmarshal(data, &accounts); err != nil {
+		return false, fmt.Errorf("parse auth.json: %w", err)
+	}
+	for _, account := range accounts {
+		if account.UserID != "" || account.Email != "" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // resolveRolePath finds the role file for the given name, trying .yaml.tmpl first, then .yaml.
 // Returns the path and whether it's a template file.
 func resolveRolePath(dir, name string) (string, bool) {

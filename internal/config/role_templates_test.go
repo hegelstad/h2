@@ -130,6 +130,20 @@ func TestEmbeddedPodTemplateNamesWithStyle(t *testing.T) {
 	}
 }
 
+func TestGrokConfigTemplate(t *testing.T) {
+	opinionated := GrokConfigTemplate("opinionated")
+	if !strings.Contains(opinionated, "permission_mode") {
+		t.Fatal("opinionated grok template missing permission_mode")
+	}
+	minimal := GrokConfigTemplate("minimal")
+	if minimal == "" {
+		t.Fatal("minimal grok template is empty")
+	}
+	if strings.Contains(minimal, "permission_mode") {
+		t.Fatal("minimal grok template should stay a placeholder")
+	}
+}
+
 func TestInstructionsTemplate(t *testing.T) {
 	content := InstructionsTemplate()
 	if content == "" {

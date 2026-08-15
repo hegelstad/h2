@@ -22,6 +22,7 @@ func setupProfileTestH2Dir(t *testing.T) string {
 		"profiles-shared",
 		"claude-config",
 		"codex-config",
+		"grok-config",
 		"roles",
 		"sessions",
 		"sockets",
@@ -90,6 +91,19 @@ func TestProfileCreate_SymlinkShared(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := os.MkdirAll(filepath.Join(h2Dir, "grok-config", srcProfile), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h2Dir, "grok-config", srcProfile, "config.toml"), []byte("ok = true"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h2Dir, "grok-config", srcProfile, "auth.json"), []byte(`{"auth":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h2Dir, "grok-config", srcProfile, "ratelimit.json"), []byte(`{"resets_at":"2099-01-01T00:00:00Z"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := newProfileCreateCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)
@@ -121,6 +135,9 @@ func TestProfileCreate_SymlinkShared(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h2Dir, "codex-config", "new", "auth.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected codex auth file to be excluded, got err=%v", err)
 	}
+	if _, err := os.Stat(filepath.Join(h2Dir, "grok-config", "new", "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected grok auth file to be excluded, got err=%v", err)
+	}
 
 	claudeTarget, err := os.Readlink(filepath.Join(h2Dir, "claude-config", "new", "CLAUDE.md"))
 	if err != nil {
@@ -138,12 +155,21 @@ func TestProfileCreate_SymlinkShared(t *testing.T) {
 		t.Fatalf("codex AGENTS.md target = %q, want %q", codexTarget, want)
 	}
 
+	grokTarget, err := os.Readlink(filepath.Join(h2Dir, "grok-config", "new", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("readlink grok shared link: %v", err)
+	}
+	if want := filepath.Join("..", "..", "profiles-shared", "new", "CLAUDE_AND_AGENTS.md"); grokTarget != want {
+		t.Fatalf("grok AGENTS.md target = %q, want %q", grokTarget, want)
+	}
+
 	// Runtime state from the source must not be copied into the new profile.
 	for _, leaked := range []string{
 		filepath.Join(h2Dir, "claude-config", "new", "ratelimit.json"),
 		filepath.Join(h2Dir, "claude-config", "new", "history.jsonl"),
 		filepath.Join(h2Dir, "claude-config", "new", "projects"),
 		filepath.Join(h2Dir, "codex-config", "new", "ratelimit.json"),
+		filepath.Join(h2Dir, "grok-config", "new", "ratelimit.json"),
 	} {
 		if _, err := os.Stat(leaked); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to not exist (runtime state should not leak), err=%v", leaked, err)
@@ -227,6 +253,17 @@ func TestProfileReset_DefaultsPreserveAuthAndCustomSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	grokDir := filepath.Join(h2Dir, "grok-config", name)
+	if err := os.MkdirAll(grokDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grokDir, "config.toml"), []byte("old-config"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grokDir, "auth.json"), []byte(`{"auth":"keep"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := newProfileUpdateCmd()
 	cmd.SetArgs([]string{name})
 	if err := cmd.Execute(); err != nil {
@@ -282,6 +319,13 @@ func TestProfileReset_DefaultsPreserveAuthAndCustomSkills(t *testing.T) {
 	if string(gotCodexReqs) != config.CodexRequirementsTemplate("opinionated") {
 		t.Fatalf("codex requirements were not reset")
 	}
+	gotGrokConfig, err := os.ReadFile(filepath.Join(grokDir, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotGrokConfig) != config.GrokConfigTemplate("opinionated") {
+		t.Fatalf("grok config was not reset")
+	}
 
 	claudeAuth, err := os.ReadFile(filepath.Join(claudeDir, ".claude.json"))
 	if err != nil {
@@ -296,6 +340,13 @@ func TestProfileReset_DefaultsPreserveAuthAndCustomSkills(t *testing.T) {
 	}
 	if string(codexAuth) != `{"auth":"keep"}` {
 		t.Fatalf("codex auth changed unexpectedly")
+	}
+	grokAuth, err := os.ReadFile(filepath.Join(grokDir, "auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(grokAuth) != `{"auth":"keep"}` {
+		t.Fatalf("grok auth changed unexpectedly")
 	}
 
 	sharedMeta, err := config.ReadContentMeta(sharedDir)
@@ -330,6 +381,14 @@ func TestProfileReset_DefaultsPreserveAuthAndCustomSkills(t *testing.T) {
 	if _, ok := codexMeta.Files["requirements.toml"]; !ok {
 		t.Fatalf("expected requirements.toml metadata entry")
 	}
+
+	grokMeta, err := config.ReadContentMeta(grokDir)
+	if err != nil {
+		t.Fatalf("read grok metadata: %v", err)
+	}
+	if _, ok := grokMeta.Files["config.toml"]; !ok {
+		t.Fatalf("expected grok config.toml metadata entry")
+	}
 }
 
 func TestProfileReset_IncludeAuthClearsAuthFiles(t *testing.T) {
@@ -357,6 +416,14 @@ func TestProfileReset_IncludeAuthClearsAuthFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	grokDir := filepath.Join(h2Dir, "grok-config", name)
+	if err := os.MkdirAll(grokDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(grokDir, "auth.json"), []byte(`{"auth":"delete"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	cmd := newProfileUpdateCmd()
 	cmd.SetArgs([]string{name, "--include-auth", "--include-skills=false", "--include-instructions=false", "--include-settings=false"})
 	if err := cmd.Execute(); err != nil {
@@ -368,6 +435,9 @@ func TestProfileReset_IncludeAuthClearsAuthFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(codexDir, "auth.json")); !os.IsNotExist(err) {
 		t.Fatalf("expected auth.json to be removed, err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(grokDir, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected grok auth.json to be removed, err=%v", err)
 	}
 }
 
@@ -393,6 +463,7 @@ func TestProfileShow_IncludesSymlinksAndMetadata(t *testing.T) {
 		"Symlink profiles-shared/demo: no",
 		"Symlink claude-config/demo/CLAUDE.md: yes ->",
 		"Symlink codex-config/demo/AGENTS.md: yes ->",
+		"Symlink grok-config/demo/AGENTS.md: yes ->",
 		"Metadata profiles-shared/demo:",
 		"CLAUDE_AND_AGENTS.md | v",
 		"Metadata claude-config/demo:",
@@ -400,6 +471,7 @@ func TestProfileShow_IncludesSymlinksAndMetadata(t *testing.T) {
 		"Metadata codex-config/demo:",
 		"config.toml | v",
 		"requirements.toml | v",
+		"Metadata grok-config/demo:",
 	}
 	for _, want := range checks {
 		if !strings.Contains(s, want) {
@@ -591,11 +663,15 @@ func TestProfileUpdate_DryRunAll(t *testing.T) {
 func TestDiscoverProfilesWithHarness(t *testing.T) {
 	h2Dir := setupProfileTestH2Dir(t)
 
-	// Create claude-only, codex-only, and both profiles.
+	// Create claude-only, codex-only, grok-only, and mixed profiles.
 	os.MkdirAll(filepath.Join(h2Dir, "claude-config", "claude-only"), 0o755)
 	os.MkdirAll(filepath.Join(h2Dir, "codex-config", "codex-only"), 0o755)
+	os.MkdirAll(filepath.Join(h2Dir, "grok-config", "grok-only"), 0o755)
 	os.MkdirAll(filepath.Join(h2Dir, "claude-config", "both"), 0o755)
 	os.MkdirAll(filepath.Join(h2Dir, "codex-config", "both"), 0o755)
+	os.MkdirAll(filepath.Join(h2Dir, "claude-config", "all-three"), 0o755)
+	os.MkdirAll(filepath.Join(h2Dir, "codex-config", "all-three"), 0o755)
+	os.MkdirAll(filepath.Join(h2Dir, "grok-config", "all-three"), 0o755)
 	// profiles-shared only should NOT appear.
 	os.MkdirAll(filepath.Join(h2Dir, "profiles-shared", "shared-only"), 0o755)
 
@@ -619,6 +695,12 @@ func TestDiscoverProfilesWithHarness(t *testing.T) {
 	if h := got["codex-only"]; len(h) != 1 || h[0] != "codex" {
 		t.Errorf("codex-only: got %v, want [codex]", h)
 	}
+	if h := got["grok-only"]; len(h) != 1 || h[0] != "grok" {
+		t.Errorf("grok-only: got %v, want [grok]", h)
+	}
+	if h := got["all-three"]; len(h) != 3 || h[0] != "claude_code" || h[1] != "codex" || h[2] != "grok" {
+		t.Errorf("all-three: got %v, want [claude_code codex grok]", h)
+	}
 	if _, found := got["shared-only"]; found {
 		t.Error("profiles-shared-only profile should not be discovered")
 	}
@@ -629,6 +711,7 @@ func TestProfileList_ShowsHarnesses(t *testing.T) {
 
 	os.MkdirAll(filepath.Join(h2Dir, "claude-config", "staging"), 0o755)
 	os.MkdirAll(filepath.Join(h2Dir, "codex-config", "staging"), 0o755)
+	os.MkdirAll(filepath.Join(h2Dir, "grok-config", "staging"), 0o755)
 	os.MkdirAll(filepath.Join(h2Dir, "claude-config", "prod"), 0o755)
 
 	cmd := newProfileListCmd()
@@ -643,8 +726,8 @@ func TestProfileList_ShowsHarnesses(t *testing.T) {
 	if !strings.Contains(output, "prod (claude_code)") {
 		t.Errorf("expected 'prod (claude_code)' in output:\n%s", output)
 	}
-	if !strings.Contains(output, "staging (claude_code, codex)") {
-		t.Errorf("expected 'staging (claude_code, codex)' in output:\n%s", output)
+	if !strings.Contains(output, "staging (claude_code, codex, grok)") {
+		t.Errorf("expected 'staging (claude_code, codex, grok)' in output:\n%s", output)
 	}
 }
 
@@ -721,5 +804,149 @@ func TestFormatHarnessLabels_WithIndefiniteRateLimit(t *testing.T) {
 	want := "claude_code rate limited, codex"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestProfileCreate_GrokOnly(t *testing.T) {
+	h2Dir := setupProfileTestH2Dir(t)
+
+	cmd := newProfileCreateCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs([]string{"solo", "--agent-harness", "grok"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("profile create grok failed: %v", err)
+	}
+
+	if !pathExists(filepath.Join(h2Dir, "grok-config", "solo", "config.toml")) {
+		t.Fatal("expected grok-config/solo/config.toml")
+	}
+	if pathExists(filepath.Join(h2Dir, "claude-config", "solo")) {
+		t.Fatal("did not expect claude-config/solo for grok-only create")
+	}
+	if pathExists(filepath.Join(h2Dir, "codex-config", "solo")) {
+		t.Fatal("did not expect codex-config/solo for grok-only create")
+	}
+
+	target, err := os.Readlink(filepath.Join(h2Dir, "grok-config", "solo", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("readlink grok AGENTS.md: %v", err)
+	}
+	if want := filepath.Join("..", "..", "profiles-shared", "solo", "CLAUDE_AND_AGENTS.md"); target != want {
+		t.Fatalf("grok AGENTS.md target = %q, want %q", target, want)
+	}
+
+	got, err := os.ReadFile(filepath.Join(h2Dir, "grok-config", "solo", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != config.GrokConfigTemplate("opinionated") {
+		t.Fatal("grok config.toml was not the opinionated template")
+	}
+}
+
+func TestProfileCreate_AddsGrokToExistingProfile(t *testing.T) {
+	h2Dir := setupProfileTestH2Dir(t)
+
+	create := newProfileCreateCmd()
+	create.SetArgs([]string{"work", "--agent-harness", "claude_code"})
+	if err := create.Execute(); err != nil {
+		t.Fatalf("create claude profile: %v", err)
+	}
+
+	sharedPath := filepath.Join(h2Dir, "profiles-shared", "work", "CLAUDE_AND_AGENTS.md")
+	if err := os.WriteFile(sharedPath, []byte("keep-me"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	add := newProfileCreateCmd()
+	var out bytes.Buffer
+	add.SetOut(&out)
+	add.SetErr(&out)
+	add.SetArgs([]string{"work", "--agent-harness", "grok"})
+	if err := add.Execute(); err != nil {
+		t.Fatalf("add grok harness failed: %v", err)
+	}
+
+	gotShared, err := os.ReadFile(sharedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotShared) != "keep-me" {
+		t.Fatalf("adding grok rewrote shared instructions: %q", gotShared)
+	}
+	if !strings.Contains(out.String(), "Reused existing profiles-shared/work") {
+		t.Fatalf("expected reuse message, got:\n%s", out.String())
+	}
+
+	target, err := os.Readlink(filepath.Join(h2Dir, "grok-config", "work", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("readlink grok AGENTS.md: %v", err)
+	}
+	if want := filepath.Join("..", "..", "profiles-shared", "work", "CLAUDE_AND_AGENTS.md"); target != want {
+		t.Fatalf("grok AGENTS.md target = %q, want %q", target, want)
+	}
+}
+
+func TestProfileUpdate_PreservesExistingGrokSkillsDir(t *testing.T) {
+	h2Dir := setupProfileTestH2Dir(t)
+
+	create := newProfileCreateCmd()
+	create.SetArgs([]string{"work", "--agent-harness", "grok"})
+	if err := create.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	skillsDir := filepath.Join(h2Dir, "grok-config", "work", "skills")
+	if err := os.Remove(skillsDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(skillsDir, "bundled"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "bundled", "SKILL.md"), []byte("bundled"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	update := newProfileUpdateCmd()
+	var out bytes.Buffer
+	update.SetOut(&out)
+	update.SetErr(&out)
+	update.SetArgs([]string{"work", "--include-instructions=false", "--include-skills=false"})
+	if err := update.Execute(); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	info, err := os.Lstat(skillsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("existing grok skills directory was replaced with a symlink")
+	}
+	got, err := os.ReadFile(filepath.Join(skillsDir, "bundled", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "bundled" {
+		t.Fatalf("bundled skill was modified: %q", got)
+	}
+	if !strings.Contains(out.String(), "existing directory") {
+		t.Fatalf("expected skip message, got:\n%s", out.String())
+	}
+}
+
+func TestProfileCreate_InvalidHarness(t *testing.T) {
+	setupProfileTestH2Dir(t)
+
+	cmd := newProfileCreateCmd()
+	cmd.SetArgs([]string{"x", "--agent-harness", "nope"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid harness")
+	}
+	if !strings.Contains(err.Error(), "invalid --agent-harness") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }

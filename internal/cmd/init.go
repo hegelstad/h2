@@ -146,6 +146,7 @@ func runFullInit(cmd *cobra.Command, abs, prefix, style string, out io.Writer) e
 		"sockets",
 		filepath.Join("claude-config", "default"),
 		filepath.Join("codex-config", "default"),
+		filepath.Join("grok-config", "default"),
 		filepath.Join("profiles-shared", "default", "skills"),
 		"projects",
 		"worktrees",
@@ -227,6 +228,9 @@ func generateDefaultProfile(abs, style string, force bool, out io.Writer) error 
 			checkSymlinkPreflight(filepath.Join(abs, "codex-config", "default", "skills"), filepath.Join("..", "..", "profiles-shared", "default", "skills"), "codex-config/default/skills"),
 			checkFilePreflight(filepath.Join(abs, "codex-config", "default", "config.toml"), "codex-config/default/config.toml")[0],
 			checkFilePreflight(filepath.Join(abs, "codex-config", "default", "requirements.toml"), "codex-config/default/requirements.toml")[0],
+			checkSymlinkPreflight(filepath.Join(abs, "grok-config", "default", "AGENTS.md"), filepath.Join("..", "..", "profiles-shared", "default", "CLAUDE_AND_AGENTS.md"), "grok-config/default/AGENTS.md"),
+			checkSymlinkPreflight(filepath.Join(abs, "grok-config", "default", "skills"), filepath.Join("..", "..", "profiles-shared", "default", "skills"), "grok-config/default/skills"),
+			checkFilePreflight(filepath.Join(abs, "grok-config", "default", "config.toml"), "grok-config/default/config.toml")[0],
 		}
 		if err := summarizePreflight("profile", items); err != nil {
 			return err

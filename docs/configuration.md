@@ -2,7 +2,7 @@
 
 ## Account Profiles
 
-Each agent harness (Claude Code, Codex) has its own native configuration format. h2 manages these configs in per-profile directories under the h2 dir, so multiple agents can share auth credentials and base settings while keeping their configs isolated from the user's personal agent configs.
+Each agent harness (Claude Code, Codex, Grok Build) has its own native configuration format. h2 manages these configs in per-profile directories under the h2 dir, so multiple agents can share auth credentials and base settings while keeping their configs isolated from the user's personal agent configs.
 
 ### Directory layout
 
@@ -21,22 +21,30 @@ Each agent harness (Claude Code, Codex) has its own native configuration format.
 │   │   └── requirements.toml  # prefix_rules, allowed policies, etc.
 │   └── work/
 │       └── ...
+├── grok-config/
+│   ├── default/
+│   │   ├── auth.json     # xAI OIDC credentials
+│   │   ├── config.toml
+│   │   └── AGENTS.md     # symlink to shared instructions
+│   └── work/
+│       └── ...
 ```
 
 ### What lives in profiles
 
 Tool allow/deny rules and command restrictions are configured in the native agent config format within the profile, **not** in h2 role config:
 
-| Setting | Claude Code | Codex |
-|---|---|---|
-| Auth credentials | `.claude.json` (OAuth) | `config.toml` (API key) |
-| Tool allow/deny rules | `settings.json` → `permissions.allow` / `permissions.deny` | n/a |
-| Command prefix rules | n/a | `requirements.toml` → `[rules].prefix_rules` |
-| Hooks | `settings.json` → `hooks` (h2 injects standard hooks) | n/a (pending Codex hooks support) |
+| Setting | Claude Code | Codex | Grok Build |
+|---|---|---|---|
+| Auth credentials | `.claude.json` (OAuth) | `config.toml` (API key) | `auth.json` (xAI OIDC; `h2 auth grok`) |
+| Tool allow/deny rules | `settings.json` → `permissions.allow` / `permissions.deny` | n/a | `config.toml` → `[permission]` / `[ui].permission_mode` |
+| Command prefix rules | n/a | `requirements.toml` → `[rules].prefix_rules` | n/a |
+| Hooks | `settings.json` → `hooks` (h2 injects standard hooks) | n/a (pending Codex hooks support) | n/a (Grok hooks exist, not wired into h2 yet) |
 
 h2 sets the config directory for each agent via environment variables:
 - Claude Code: `CLAUDE_CONFIG_DIR=<profile_dir>`
 - Codex: `CODEX_HOME=<profile_dir>`
+- Grok Build: `GROK_HOME=<profile_dir>`
 
 ### Rationale
 
@@ -64,6 +72,18 @@ Codex loads instructions from a similar hierarchy, with one notable difference:
 2. **Account profile `AGENTS.md`** — `~/.h2/codex-config/<profile>/AGENTS.md`. h2 sets `CODEX_HOME` to the profile directory.
 3. **Role `instructions`** — passed via `-c instructions=<json>`.
 4. **Project `AGENTS.md`** — `AGENTS.md` in the agent's working directory. Codex discovers this automatically.
+
+### Grok Build
+
+Grok loads instructions from a similar hierarchy. h2 sets `GROK_HOME` to the profile directory:
+
+1. **Global `~/.grok/AGENTS.md`** — **not loaded** by Grok when h2 sets `GROK_HOME`.
+2. **Account profile `AGENTS.md`** — `~/.h2/grok-config/<profile>/AGENTS.md` (symlink to the shared `CLAUDE_AND_AGENTS.md`). Grok reads `$GROK_HOME/AGENTS.md` as global rules for all projects.
+3. **Role `system_prompt`** — if set, passed as `--system-prompt-override`.
+4. **Role `instructions`** — passed as `--rules`.
+5. **Project `AGENTS.md`** — `AGENTS.md` in the agent's working directory (and parent directories). Grok discovers these automatically.
+
+Profile `skills/` is also symlinked into `$GROK_HOME/skills`, which is Grok's user-level skill directory.
 
 ### What goes where
 
@@ -97,7 +117,7 @@ A **role** is a named YAML file in `~/.h2/roles/` that defines how to launch an 
 | `agent_name` | string | *(auto-generated)* | Agent name when launched; empty = random name. Supports templates and name functions (see below). Overridden by `h2 run <name>`. |
 | `description` | string | | Human-readable description |
 | **Agent harness** | | | |
-| `agent_harness` | string | `claude_code` | `claude_code` \| `codex` \| `generic` |
+| `agent_harness` | string | `claude_code` | `claude_code` \| `codex` \| `grok` \| `generic` |
 | `agent_harness_command` | string | harness default | Command override (e.g. custom binary path) |
 | `agent_model` | string | | Model name; empty = agent app's own default |
 | **Account profile** | | | |
@@ -106,10 +126,12 @@ A **role** is a named YAML file in `~/.h2/roles/` that defines how to launch an 
 | `claude_code_config_path_prefix` | string | `<h2>/claude-config` | Prefix for auto-derived Claude config path |
 | `codex_config_path` | string | `<h2>/codex-config/<profile>` | Explicit Codex config dir override |
 | `codex_config_path_prefix` | string | `<h2>/codex-config` | Prefix for auto-derived Codex config path |
+| `grok_config_path_prefix` | string | `<h2>/grok-config` | Prefix for auto-derived Grok config path |
 | **Permissions / Approval** | | | |
 | `claude_permission_mode` | string | | Claude Code `--permission-mode`: `default` \| `acceptEdits` \| `plan` \| `dontAsk` \| `bypassPermissions` |
 | `codex_sandbox_mode` | string | | Codex `--sandbox`: `read-only` \| `workspace-write` \| `danger-full-access` |
 | `codex_ask_for_approval` | string | | Codex `--ask-for-approval`: `untrusted` \| `on-request` \| `never` |
+| `grok_permission_mode` | string | | Grok Build `--permission-mode`: `default` \| `acceptEdits` \| `auto` \| `plan` \| `dontAsk` \| `bypassPermissions` |
 | `permission_review` | object | | Permission review strategies: `dcg` (rule-based) and `ai_reviewer` (LLM-based). See below. |
 | **Prompt content** | | | |
 | `system_prompt` | string | | Replaces agent's entire default system prompt (`--system-prompt`) |

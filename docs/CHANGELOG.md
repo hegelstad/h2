@@ -38,6 +38,10 @@
 
 ### New Features
 
+- **Grok profiles**: `h2 profile create/list/show/update` now treat Grok Build
+  the same as Claude and Codex. Shared instructions and skills are symlinked
+  into `grok-config/<name>/` (`AGENTS.md`, `skills/`) via `GROK_HOME`.
+  `--agent-harness grok` creates a Grok-only profile; `all` includes Grok.
 - **Ctrl+Space mode switching**: Added ctrl+space as an alternative to ctrl+\
   for switching between modes (normal, menu, passthrough). Helps users with
   keyboard layouts that lack a backslash key (e.g. Norwegian).

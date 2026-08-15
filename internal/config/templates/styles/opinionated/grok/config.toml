@@ -1,0 +1,8 @@
+# Grok Build profile configuration
+# Intentionally minimal placeholder; add values as needed.
+
+[ui]
+# h2 agents typically run unattended; the role can still override this
+# with grok_permission_mode / --permission-mode.
+permission_mode = "always-approve"
+remember_tool_approvals = true

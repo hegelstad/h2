@@ -74,6 +74,7 @@ func expectedDirs() []string {
 		"sockets",
 		filepath.Join("claude-config", "default"),
 		filepath.Join("codex-config", "default"),
+		filepath.Join("grok-config", "default"),
 		filepath.Join("profiles-shared", "default", "skills"),
 		"projects",
 		"worktrees",
@@ -474,6 +475,9 @@ func TestInitCmd_CreatesClaudeSettingsAndCodexRequirements(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "codex-config", "default", "requirements.toml")); err != nil {
 		t.Fatalf("expected codex requirements.toml to exist: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(dir, "grok-config", "default", "config.toml")); err != nil {
+		t.Fatalf("expected grok config.toml to exist: %v", err)
+	}
 }
 
 func TestInitCmd_CreatesCLAUDEMDSymlink(t *testing.T) {
@@ -518,6 +522,7 @@ func TestInitCmd_CreatesSharedSkillsSymlinks(t *testing.T) {
 	}{
 		{path: filepath.Join(dir, "claude-config", "default", "skills")},
 		{path: filepath.Join(dir, "codex-config", "default", "skills")},
+		{path: filepath.Join(dir, "grok-config", "default", "skills")},
 	}
 	for _, tt := range tests {
 		target, err := os.Readlink(tt.path)
@@ -553,6 +558,7 @@ func TestInitCmd_VerboseOutput(t *testing.T) {
 		"Wrote profiles-shared/default/CLAUDE_AND_AGENTS.md",
 		"Symlinked claude-config/default/CLAUDE.md",
 		"Symlinked codex-config/default/AGENTS.md",
+		"Symlinked grok-config/default/AGENTS.md",
 		"Wrote roles/default.yaml", // may be default.yaml.tmpl
 		"Registered route",
 		"Initialized h2 directory at",
@@ -688,6 +694,9 @@ func TestInitCmd_UpdateConfigRefreshesManagedDefaults(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "codex-config", "default", "requirements.toml"), []byte("stale codex requirements"), 0o644); err != nil {
 		t.Fatalf("write stale codex requirements: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "grok-config", "default", "config.toml"), []byte("stale grok config"), 0o644); err != nil {
+		t.Fatalf("write stale grok config: %v", err)
+	}
 
 	// Replace symlinks with files so update must restore symlink structure.
 	claudeMDPath := filepath.Join(dir, "claude-config", "default", "CLAUDE.md")
@@ -758,6 +767,13 @@ func TestInitCmd_UpdateConfigRefreshesManagedDefaults(t *testing.T) {
 	if string(gotCodexReqs) != config.CodexRequirementsTemplate(initStyleOpinionated) {
 		t.Fatalf("codex requirements were not refreshed")
 	}
+	gotGrokConfig, err := os.ReadFile(filepath.Join(dir, "grok-config", "default", "config.toml"))
+	if err != nil {
+		t.Fatalf("read grok config: %v", err)
+	}
+	if string(gotGrokConfig) != config.GrokConfigTemplate(initStyleOpinionated) {
+		t.Fatalf("grok config was not refreshed")
+	}
 
 	defaultRoleFound := false
 	for _, ext := range []string{".yaml.tmpl", ".yaml"} {
@@ -788,8 +804,10 @@ func TestInitCmd_UpdateConfigRefreshesManagedDefaults(t *testing.T) {
 	}{
 		{claudeMDPath, filepath.Join("..", "..", "profiles-shared", "default", "CLAUDE_AND_AGENTS.md")},
 		{agentsMDPath, filepath.Join("..", "..", "profiles-shared", "default", "CLAUDE_AND_AGENTS.md")},
+		{filepath.Join(dir, "grok-config", "default", "AGENTS.md"), filepath.Join("..", "..", "profiles-shared", "default", "CLAUDE_AND_AGENTS.md")},
 		{filepath.Join(dir, "claude-config", "default", "skills"), filepath.Join("..", "..", "profiles-shared", "default", "skills")},
 		{filepath.Join(dir, "codex-config", "default", "skills"), filepath.Join("..", "..", "profiles-shared", "default", "skills")},
+		{filepath.Join(dir, "grok-config", "default", "skills"), filepath.Join("..", "..", "profiles-shared", "default", "skills")},
 	} {
 		target, linkErr := os.Readlink(check.path)
 		if linkErr != nil {

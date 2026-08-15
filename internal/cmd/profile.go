@@ -20,6 +20,7 @@ const (
 	profileHarnessAll    = "all"
 	profileHarnessClaude = "claude_code"
 	profileHarnessCodex  = "codex"
+	profileHarnessGrok   = "grok"
 )
 
 func newProfileCmd() *cobra.Command {
@@ -156,12 +157,14 @@ func newProfileShowCmd() *cobra.Command {
 			sharedDir := filepath.Join(h2Dir, "profiles-shared", name)
 			claudeDir := filepath.Join(h2Dir, "claude-config", name)
 			codexDir := filepath.Join(h2Dir, "codex-config", name)
+			grokDir := filepath.Join(h2Dir, "grok-config", name)
 
 			sharedExists := pathExists(sharedDir)
 			claudeExists := pathExists(claudeDir)
 			codexExists := pathExists(codexDir)
+			grokExists := pathExists(grokDir)
 
-			if !sharedExists && !claudeExists && !codexExists {
+			if !sharedExists && !claudeExists && !codexExists && !grokExists {
 				return fmt.Errorf("profile %q not found", name)
 			}
 
@@ -189,6 +192,15 @@ func newProfileShowCmd() *cobra.Command {
 					aeMap[profileHarnessCodex] = ae
 				}
 			}
+			if grokExists {
+				harnesses = append(harnesses, profileHarnessGrok)
+				if rl := config.IsProfileRateLimited(grokDir); rl != nil {
+					rlMap[profileHarnessGrok] = rl
+				}
+				if ae := config.IsProfileAuthError(grokDir); ae != nil {
+					aeMap[profileHarnessGrok] = ae
+				}
+			}
 			if len(harnesses) > 0 {
 				p := profileInfo{Name: name, Harnesses: harnesses, RateLimitedMap: rlMap, AuthErrorMap: aeMap}
 				fmt.Fprintf(out, "Profile: %s (%s)\n", name, formatHarnessLabels(p))
@@ -198,6 +210,7 @@ func newProfileShowCmd() *cobra.Command {
 			fmt.Fprintf(out, "  Shared: %s (%s)\n", sharedDir, yesNo(sharedExists))
 			fmt.Fprintf(out, "  Claude: %s (%s)\n", claudeDir, yesNo(claudeExists))
 			fmt.Fprintf(out, "  Codex:  %s (%s)\n", codexDir, yesNo(codexExists))
+			fmt.Fprintf(out, "  Grok:   %s (%s)\n", grokDir, yesNo(grokExists))
 			fmt.Fprintf(out, "  Symlink profiles-shared/%s: %s\n", name, symlinkStatus(sharedDir))
 			fmt.Fprintf(out, "  Symlink claude-config/%s/CLAUDE.md: %s\n", name, symlinkStatus(filepath.Join(claudeDir, "CLAUDE.md")))
 			fmt.Fprintf(out, "  Symlink claude-config/%s/skills: %s\n", name, symlinkStatus(filepath.Join(claudeDir, "skills")))
@@ -205,6 +218,9 @@ func newProfileShowCmd() *cobra.Command {
 			fmt.Fprintf(out, "  Symlink codex-config/%s/AGENTS.md: %s\n", name, symlinkStatus(filepath.Join(codexDir, "AGENTS.md")))
 			fmt.Fprintf(out, "  Symlink codex-config/%s/skills: %s\n", name, symlinkStatus(filepath.Join(codexDir, "skills")))
 			fmt.Fprintf(out, "  Symlink codex-config/%s/shared-skill-scripts: %s\n", name, symlinkStatus(filepath.Join(codexDir, "shared-skill-scripts")))
+			fmt.Fprintf(out, "  Symlink grok-config/%s/AGENTS.md: %s\n", name, symlinkStatus(filepath.Join(grokDir, "AGENTS.md")))
+			fmt.Fprintf(out, "  Symlink grok-config/%s/skills: %s\n", name, symlinkStatus(filepath.Join(grokDir, "skills")))
+			fmt.Fprintf(out, "  Symlink grok-config/%s/shared-skill-scripts: %s\n", name, symlinkStatus(filepath.Join(grokDir, "shared-skill-scripts")))
 
 			if claudeExists {
 				auth, err := config.IsClaudeConfigAuthenticated(claudeDir)
@@ -214,6 +230,14 @@ func newProfileShowCmd() *cobra.Command {
 					fmt.Fprintf(out, "  Claude authenticated: %s\n", yesNo(auth))
 				}
 			}
+			if grokExists {
+				auth, err := config.IsGrokConfigAuthenticated(grokDir)
+				if err != nil {
+					fmt.Fprintf(out, "  Grok authenticated: error (%v)\n", err)
+				} else {
+					fmt.Fprintf(out, "  Grok authenticated: %s\n", yesNo(auth))
+				}
+			}
 			if err := printContentMeta(out, "profiles-shared/"+name, sharedDir); err != nil {
 				return err
 			}
@@ -221,6 +245,9 @@ func newProfileShowCmd() *cobra.Command {
 				return err
 			}
 			if err := printContentMeta(out, "codex-config/"+name, codexDir); err != nil {
+				return err
+			}
+			if err := printContentMeta(out, "grok-config/"+name, grokDir); err != nil {
 				return err
 			}
 			return nil
@@ -238,10 +265,11 @@ func newProfileCreateCmd() *cobra.Command {
 		Short: "Create a new profile",
 		Long: `Create a named profile scaffold under the h2 directory.
 
-By default this creates both Claude and Codex profile files. Use --agent-harness
+By default this creates Claude, Codex, and Grok profile files. Use --agent-harness
 to create only one harness profile:
   --agent-harness claude_code
   --agent-harness codex
+  --agent-harness grok
   --agent-harness all
 
 Use --symlink-shared to link shared profile content from an existing profile.`,
@@ -262,10 +290,10 @@ Use --symlink-shared to link shared profile content from an existing profile.`,
 
 			harnessType = strings.TrimSpace(harnessType)
 			switch harnessType {
-			case profileHarnessAll, profileHarnessClaude, profileHarnessCodex:
+			case profileHarnessAll, profileHarnessClaude, profileHarnessCodex, profileHarnessGrok:
 			default:
-				return fmt.Errorf("invalid --agent-harness %q; valid: %s, %s, %s",
-					harnessType, profileHarnessClaude, profileHarnessCodex, profileHarnessAll)
+				return fmt.Errorf("invalid --agent-harness %q; valid: %s, %s, %s, %s",
+					harnessType, profileHarnessClaude, profileHarnessCodex, profileHarnessGrok, profileHarnessAll)
 			}
 
 			symlinkSharedFrom = strings.TrimSpace(symlinkSharedFrom)
@@ -283,7 +311,7 @@ Use --symlink-shared to link shared profile content from an existing profile.`,
 
 	cmd.Flags().StringVar(&style, "style", initStyleOpinionated, "Profile style: minimal, opinionated")
 	cmd.Flags().StringVar(&symlinkSharedFrom, "symlink-shared", "", "Symlink shared profile content from an existing profile name")
-	cmd.Flags().StringVar(&harnessType, "agent-harness", profileHarnessAll, "Harness profile to create: claude_code, codex, all")
+	cmd.Flags().StringVar(&harnessType, "agent-harness", profileHarnessAll, "Harness profile to create: claude_code, codex, grok, all")
 	return cmd
 }
 
@@ -339,11 +367,13 @@ func resetProfile(h2Dir, name, style string, opts resetProfileOpts, out io.Write
 	sharedSkillsDir := filepath.Join(sharedDir, "skills")
 	claudeDir := filepath.Join(h2Dir, "claude-config", name)
 	codexDir := filepath.Join(h2Dir, "codex-config", name)
+	grokDir := filepath.Join(h2Dir, "grok-config", name)
 
 	sharedExists := pathExists(sharedDir)
 	claudeExists := pathExists(claudeDir)
 	codexExists := pathExists(codexDir)
-	if !sharedExists && !claudeExists && !codexExists {
+	grokExists := pathExists(grokDir)
+	if !sharedExists && !claudeExists && !codexExists && !grokExists {
 		return fmt.Errorf("profile %q not found", name)
 	}
 
@@ -387,6 +417,11 @@ func resetProfile(h2Dir, name, style string, opts resetProfileOpts, out io.Write
 				return err
 			}
 		}
+		if grokExists {
+			if err := resetProfileGrokSettings(grokDir, name, style, opts.dryRun, out); err != nil {
+				return err
+			}
+		}
 	}
 
 	if opts.includeAuth {
@@ -424,6 +459,25 @@ func resetProfile(h2Dir, name, style string, opts resetProfileOpts, out io.Write
 				}
 				if pathExists(authPath) {
 					return fmt.Errorf("remove codex auth: %s still exists", authPath)
+				}
+				fmt.Fprintf(out, "  %s: cleared\n", label)
+			}
+		}
+		if grokExists {
+			authPath := filepath.Join(grokDir, "auth.json")
+			label := fmt.Sprintf("grok-config/%s/auth.json", name)
+			if opts.dryRun {
+				if pathExists(authPath) {
+					fmt.Fprintf(out, "  %s: would clear\n", label)
+				} else {
+					fmt.Fprintf(out, "  %s: not present\n", label)
+				}
+			} else {
+				if err := os.Remove(authPath); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("remove grok auth: %w", err)
+				}
+				if pathExists(authPath) {
+					return fmt.Errorf("remove grok auth: %s still exists", authPath)
 				}
 				fmt.Fprintf(out, "  %s: cleared\n", label)
 			}
@@ -567,10 +621,47 @@ func resetProfileCodexSettings(codexDir, name, style string, dryRun bool, out io
 	return ensureCodexProfileScaffold(codexDir, name, style, out)
 }
 
+// resetProfileGrokSettings handles Grok harness settings/symlinks for a profile update.
+func resetProfileGrokSettings(grokDir, name, style string, dryRun bool, out io.Writer) error {
+	if dryRun {
+		for _, link := range []struct {
+			file, target string
+			skipDir      bool
+		}{
+			{"AGENTS.md", filepath.Join("..", "..", "profiles-shared", name, "CLAUDE_AND_AGENTS.md"), false},
+			{"skills", filepath.Join("..", "..", "profiles-shared", name, "skills"), true},
+			{"shared-skill-scripts", filepath.Join("..", "..", "profiles-shared", name, "shared-skill-scripts"), true},
+		} {
+			label := fmt.Sprintf("grok-config/%s/%s", name, link.file)
+			path := filepath.Join(grokDir, link.file)
+			if link.skipDir {
+				if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+					fmt.Fprintf(out, "  %s: unchanged (existing directory)\n", label)
+					continue
+				}
+			}
+			existing, err := os.Readlink(path)
+			if err == nil && existing == link.target {
+				fmt.Fprintf(out, "  %s: unchanged (symlink)\n", label)
+			} else if err == nil {
+				fmt.Fprintf(out, "  %s: updated (symlink)\n", label)
+			} else {
+				fmt.Fprintf(out, "  %s: added (symlink)\n", label)
+			}
+		}
+		label := fmt.Sprintf("grok-config/%s/config.toml", name)
+		status := compareFileContent(filepath.Join(grokDir, "config.toml"), config.GrokConfigTemplate(style))
+		fmt.Fprintf(out, "  %s: %s\n", label, fileStatusLabel(status))
+		return nil
+	}
+	return ensureGrokProfileScaffold(grokDir, name, style, out)
+}
+
 func createOrUpdateProfile(h2Dir, name, style, symlinkSharedFrom, harnessType string, requireNew, announce bool, out io.Writer) error {
 	sharedDir := filepath.Join(h2Dir, "profiles-shared", name)
 	claudeDir := filepath.Join(h2Dir, "claude-config", name)
 	codexDir := filepath.Join(h2Dir, "codex-config", name)
+	grokDir := filepath.Join(h2Dir, "grok-config", name)
 
 	if requireNew {
 		switch harnessType {
@@ -584,18 +675,19 @@ func createOrUpdateProfile(h2Dir, name, style, symlinkSharedFrom, harnessType st
 			if err := ensurePathMissing(codexDir, "codex-config/"+name); err != nil {
 				return err
 			}
-		case profileHarnessClaude:
-			if err := ensurePathMissing(sharedDir, "profiles-shared/"+name); err != nil {
+			if err := ensurePathMissing(grokDir, "grok-config/"+name); err != nil {
 				return err
 			}
+		case profileHarnessClaude:
 			if err := ensurePathMissing(claudeDir, "claude-config/"+name); err != nil {
 				return err
 			}
 		case profileHarnessCodex:
-			if err := ensurePathMissing(sharedDir, "profiles-shared/"+name); err != nil {
+			if err := ensurePathMissing(codexDir, "codex-config/"+name); err != nil {
 				return err
 			}
-			if err := ensurePathMissing(codexDir, "codex-config/"+name); err != nil {
+		case profileHarnessGrok:
+			if err := ensurePathMissing(grokDir, "grok-config/"+name); err != nil {
 				return err
 			}
 		}
@@ -604,55 +696,63 @@ func createOrUpdateProfile(h2Dir, name, style, symlinkSharedFrom, harnessType st
 	if symlinkSharedFrom != "" {
 		return createProfileWithSharedSymlink(h2Dir, name, symlinkSharedFrom, style, harnessType, out)
 	}
-	return scaffoldProfile(h2Dir, name, style, harnessType, out, announce)
+	// Adding a single harness to an existing profile should reuse shared
+	// instructions/skills. Init / --update-config still refresh them.
+	reuseShared := requireNew && pathExists(sharedDir)
+	return scaffoldProfile(h2Dir, name, style, harnessType, out, announce, reuseShared)
 }
 
-func scaffoldProfile(h2Dir, name, style, harnessType string, out io.Writer, announce bool) error {
+func scaffoldProfile(h2Dir, name, style, harnessType string, out io.Writer, announce, reuseShared bool) error {
 	sharedDir := filepath.Join(h2Dir, "profiles-shared", name)
 	sharedSkillsDir := filepath.Join(sharedDir, "skills")
 	sharedScriptsDir := filepath.Join(sharedDir, "shared-skill-scripts")
 	claudeDir := filepath.Join(h2Dir, "claude-config", name)
 	codexDir := filepath.Join(h2Dir, "codex-config", name)
+	grokDir := filepath.Join(h2Dir, "grok-config", name)
 
-	if err := os.MkdirAll(sharedSkillsDir, 0o755); err != nil {
-		return fmt.Errorf("create shared profile skills dir: %w", err)
-	}
-	if err := config.WriteSkillsTemplate(style, sharedSkillsDir, false); err != nil {
-		return fmt.Errorf("write shared skills: %w", err)
-	}
-	if err := os.MkdirAll(sharedScriptsDir, 0o755); err != nil {
-		return fmt.Errorf("create shared profile shared-skill-scripts dir: %w", err)
-	}
-	if err := config.WriteSharedSkillScriptsTemplate(style, sharedScriptsDir, false); err != nil {
-		return fmt.Errorf("write shared-skill-scripts: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(sharedDir, "CLAUDE_AND_AGENTS.md"), []byte(config.InstructionsTemplateWithStyle(style)), 0o644); err != nil {
-		return fmt.Errorf("write CLAUDE_AND_AGENTS.md: %w", err)
-	}
-	if err := config.UpsertContentMeta(sharedDir, style, []string{"CLAUDE_AND_AGENTS.md"}); err != nil {
-		return fmt.Errorf("update shared metadata: %w", err)
-	}
-	managedSkills, err := managedSkillRelativePaths(style)
-	if err != nil {
-		return err
-	}
-	if len(managedSkills) > 0 {
-		if err := config.UpsertContentMeta(sharedDir, style, managedSkills); err != nil {
+	if !reuseShared {
+		if err := os.MkdirAll(sharedSkillsDir, 0o755); err != nil {
+			return fmt.Errorf("create shared profile skills dir: %w", err)
+		}
+		if err := config.WriteSkillsTemplate(style, sharedSkillsDir, false); err != nil {
+			return fmt.Errorf("write shared skills: %w", err)
+		}
+		if err := os.MkdirAll(sharedScriptsDir, 0o755); err != nil {
+			return fmt.Errorf("create shared profile shared-skill-scripts dir: %w", err)
+		}
+		if err := config.WriteSharedSkillScriptsTemplate(style, sharedScriptsDir, false); err != nil {
+			return fmt.Errorf("write shared-skill-scripts: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(sharedDir, "CLAUDE_AND_AGENTS.md"), []byte(config.InstructionsTemplateWithStyle(style)), 0o644); err != nil {
+			return fmt.Errorf("write CLAUDE_AND_AGENTS.md: %w", err)
+		}
+		if err := config.UpsertContentMeta(sharedDir, style, []string{"CLAUDE_AND_AGENTS.md"}); err != nil {
 			return fmt.Errorf("update shared metadata: %w", err)
 		}
-	}
-	managedScripts, err := managedSharedSkillScriptRelativePaths(style)
-	if err != nil {
-		return err
-	}
-	if len(managedScripts) > 0 {
-		if err := config.UpsertContentMeta(sharedDir, style, managedScripts); err != nil {
-			return fmt.Errorf("update shared metadata: %w", err)
+		managedSkills, err := managedSkillRelativePaths(style)
+		if err != nil {
+			return err
 		}
+		if len(managedSkills) > 0 {
+			if err := config.UpsertContentMeta(sharedDir, style, managedSkills); err != nil {
+				return fmt.Errorf("update shared metadata: %w", err)
+			}
+		}
+		managedScripts, err := managedSharedSkillScriptRelativePaths(style)
+		if err != nil {
+			return err
+		}
+		if len(managedScripts) > 0 {
+			if err := config.UpsertContentMeta(sharedDir, style, managedScripts); err != nil {
+				return fmt.Errorf("update shared metadata: %w", err)
+			}
+		}
+		fmt.Fprintf(out, "  Wrote profiles-shared/%s/CLAUDE_AND_AGENTS.md\n", name)
+		fmt.Fprintf(out, "  Wrote profiles-shared/%s/skills/\n", name)
+		fmt.Fprintf(out, "  Wrote profiles-shared/%s/shared-skill-scripts/\n", name)
+	} else {
+		fmt.Fprintf(out, "  Reused existing profiles-shared/%s\n", name)
 	}
-	fmt.Fprintf(out, "  Wrote profiles-shared/%s/CLAUDE_AND_AGENTS.md\n", name)
-	fmt.Fprintf(out, "  Wrote profiles-shared/%s/skills/\n", name)
-	fmt.Fprintf(out, "  Wrote profiles-shared/%s/shared-skill-scripts/\n", name)
 
 	if harnessType == profileHarnessAll || harnessType == profileHarnessClaude {
 		if err := ensureClaudeProfileScaffold(claudeDir, name, style, out); err != nil {
@@ -666,6 +766,12 @@ func scaffoldProfile(h2Dir, name, style, harnessType string, out io.Writer, anno
 		}
 	}
 
+	if harnessType == profileHarnessAll || harnessType == profileHarnessGrok {
+		if err := ensureGrokProfileScaffold(grokDir, name, style, out); err != nil {
+			return err
+		}
+	}
+
 	if announce {
 		fmt.Fprintf(out, "Created profile %q\n", name)
 	}
@@ -674,8 +780,8 @@ func scaffoldProfile(h2Dir, name, style, harnessType string, out io.Writer, anno
 
 // createProfileWithSharedSymlink creates a new profile whose profiles-shared/
 // directory is a symlink to an existing source profile, while harness configs
-// (claude-config, codex-config) are scaffolded fresh from templates. The
-// harness configs are intentionally NOT copied from the source: each profile
+// (claude-config, codex-config, grok-config) are scaffolded fresh from templates.
+// The harness configs are intentionally NOT copied from the source: each profile
 // needs its own auth, and the source's runtime state (sessions, history,
 // caches, ratelimit, etc.) must not leak into the new profile.
 func createProfileWithSharedSymlink(h2Dir, name, sourceProfile, style, harnessType string, out io.Writer) error {
@@ -706,6 +812,13 @@ func createProfileWithSharedSymlink(h2Dir, name, sourceProfile, style, harnessTy
 	if harnessType == profileHarnessAll || harnessType == profileHarnessCodex {
 		codexDir := filepath.Join(h2Dir, "codex-config", name)
 		if err := ensureCodexProfileScaffold(codexDir, name, style, out); err != nil {
+			return err
+		}
+	}
+
+	if harnessType == profileHarnessAll || harnessType == profileHarnessGrok {
+		grokDir := filepath.Join(h2Dir, "grok-config", name)
+		if err := ensureGrokProfileScaffold(grokDir, name, style, out); err != nil {
 			return err
 		}
 	}
@@ -876,7 +989,7 @@ func ensurePathMissing(path, label string) error {
 // profileInfo holds a profile name and which harnesses it's available in.
 type profileInfo struct {
 	Name           string
-	Harnesses      []string                         // e.g. ["claude_code", "codex"]
+	Harnesses      []string                         // e.g. ["claude_code", "codex", "grok"]
 	RateLimitedMap map[string]*config.RateLimitInfo // harness -> rate limit info (nil if not limited)
 	AuthErrorMap   map[string]*config.AuthErrorInfo // harness -> auth error info (nil if no error)
 }
@@ -922,8 +1035,8 @@ func formatRateLimitLabel(harness string, rl *config.RateLimitInfo) string {
 }
 
 // discoverProfilesWithHarness scans harness-specific config directories
-// (claude-config/, codex-config/) and returns profiles with their harness
-// availability. profiles-shared/ is an implementation detail and not scanned.
+// (claude-config/, codex-config/, grok-config/) and returns profiles with their
+// harness availability. profiles-shared/ is an implementation detail and not scanned.
 func discoverProfilesWithHarness(h2Dir string) ([]profileInfo, error) {
 	type harnessDir struct {
 		harness string
@@ -932,6 +1045,7 @@ func discoverProfilesWithHarness(h2Dir string) ([]profileInfo, error) {
 	harnessDirs := []harnessDir{
 		{profileHarnessClaude, filepath.Join(h2Dir, "claude-config")},
 		{profileHarnessCodex, filepath.Join(h2Dir, "codex-config")},
+		{profileHarnessGrok, filepath.Join(h2Dir, "grok-config")},
 	}
 
 	// Collect which harnesses each profile appears in, plus rate limit and auth error info.
@@ -1047,6 +1161,22 @@ func ensureCodexProfileScaffold(codexDir, profileName, style string, out io.Writ
 	return nil
 }
 
+func ensureGrokProfileScaffold(grokDir, profileName, style string, out io.Writer) error {
+	if err := os.MkdirAll(grokDir, 0o755); err != nil {
+		return fmt.Errorf("create grok profile dir: %w", err)
+	}
+	if err := ensureGrokProfileLinks(grokDir, profileName, out); err != nil {
+		return err
+	}
+	if err := writeGeneratedFile(filepath.Join(grokDir, "config.toml"), config.GrokConfigTemplate(style), true, out, "grok-config/"+profileName+"/config.toml"); err != nil {
+		return err
+	}
+	if err := config.UpsertContentMeta(grokDir, style, []string{"config.toml"}); err != nil {
+		return fmt.Errorf("update grok metadata: %w", err)
+	}
+	return nil
+}
+
 func printContentMeta(out io.Writer, label, dir string) error {
 	metaPath := filepath.Join(dir, config.ContentMetaFileName)
 	if !pathExists(metaPath) {
@@ -1122,4 +1252,33 @@ func ensureCodexProfileLinks(codexDir, profileName string, out io.Writer) error 
 		return err
 	}
 	return nil
+}
+
+func ensureGrokProfileLinks(grokDir, profileName string, out io.Writer) error {
+	mdTarget := filepath.Join("..", "..", "profiles-shared", profileName, "CLAUDE_AND_AGENTS.md")
+	skillsTarget := filepath.Join("..", "..", "profiles-shared", profileName, "skills")
+	sharedScriptsTarget := filepath.Join("..", "..", "profiles-shared", profileName, "shared-skill-scripts")
+	if err := ensureSymlink(filepath.Join(grokDir, "AGENTS.md"), mdTarget, true, out, "grok-config/"+profileName+"/AGENTS.md"); err != nil {
+		return err
+	}
+	// Grok's first-run home may already have a real skills/ directory with
+	// bundled skills. Don't delete it; only link when missing or already a symlink.
+	if err := ensureSymlinkIfNotDir(filepath.Join(grokDir, "skills"), skillsTarget, true, out, "grok-config/"+profileName+"/skills"); err != nil {
+		return err
+	}
+	if err := ensureSymlinkIfNotDir(filepath.Join(grokDir, "shared-skill-scripts"), sharedScriptsTarget, true, out, "grok-config/"+profileName+"/shared-skill-scripts"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureSymlinkIfNotDir is like ensureSymlink, but leaves an existing real
+// directory in place (Grok may populate $GROK_HOME/skills on first run).
+func ensureSymlinkIfNotDir(path, target string, force bool, out io.Writer, label string) error {
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		fmt.Fprintf(out, "  Skipped %s (existing directory, not replacing with symlink)\n", label)
+		return nil
+	}
+	return ensureSymlink(path, target, force, out, label)
 }
