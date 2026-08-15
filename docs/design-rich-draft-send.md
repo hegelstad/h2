@@ -26,9 +26,10 @@ flowchart LR
   TG --> Persist["sendRichMessage"]
   TG --> Edit["editMessageText"]
   TG --> Plain["sendMessage fallback"]
-  Draft -.->|any error| Plain
-  Persist -.->|any error| Plain
-  Edit -.->|any error| Plain
+  Draft -.->|genuine API error| Plain
+  Draft -.->|not a private chat| Persist
+  Persist -.->|genuine API error| Plain
+  Edit -.->|genuine API error| Plain
 ```
 
 ```mermaid
@@ -44,9 +45,9 @@ sequenceDiagram
   API-->>TG: Message
   Note over TG: no draft
 
-  Note over CLI,API: Stream (--stdin)
+  Note over CLI,API: Stream in a private chat
   CLI->>TG: StreamOpen
-  loop chunks + 30s refresh
+  loop chunks + 20s refresh
     CLI->>TG: StreamWrite
     TG->>API: sendRichMessageDraft(draft_id, html)
     API-->>TG: True
@@ -55,7 +56,14 @@ sequenceDiagram
   TG->>API: sendRichMessage(html)
   API-->>TG: Message
 
-  Note over CLI,API: Any rich step fails
+  Note over CLI,API: Stream in a group/channel
+  CLI->>TG: StreamOpen
+  Note over TG: skip drafts — not a failure
+  CLI->>TG: StreamClose
+  TG->>API: sendRichMessage(html)
+  API-->>TG: Message
+
+  Note over CLI,API: Genuine persist/API error only
   TG->>API: sendMessage(original text)
 ```
 
@@ -65,9 +73,10 @@ stateDiagram-v2
   [*] --> Streaming: --stdin
   OneShot --> Persisted: sendRichMessage ok
   OneShot --> Fallback: sendRichMessage fail
-  Streaming --> Streaming: draft update / refresh
+  Streaming --> Streaming: draft update / refresh (private chat)
   Streaming --> Persisted: sendRichMessage on close
-  Streaming --> Fallback: any draft/persist fail
+  Streaming --> Persisted: not private — skip drafts, persist
+  Streaming --> Fallback: genuine draft/persist API error
   Fallback --> [*]: sendMessage original text
   Persisted --> Revised: editMessageText (later)
   Persisted --> [*]
@@ -79,14 +88,22 @@ These are not negotiable; they contradict an earlier sketch that treated a
 draft as an editable message.
 
 1. `sendRichMessageDraft` streams an ephemeral 30-second preview and returns
-   `True`. You **must** then call `sendRichMessage` to persist.
-2. Draft params: `chat_id` (Integer, **private chat only**), optional
-   `message_thread_id`, `draft_id` (Integer, **required, non-zero**; same id
-   animates), `rich_message` (`InputRichMessage`, no direct file upload).
+   `True`. You **must** then call `sendRichMessage` to persist. Type the
+   call sites differently: draft → `error` only; persist →
+   `(messageID int64, err error)`. Do not share a return type.
+2. Draft `chat_id` is Integer and **private chat only**. Persist
+   `chat_id` is Integer or String and works in groups/channels/@username.
+   A non-private target means **skip drafts and persist** — that is not a
+   failure and must not trigger the plain-text fallback. Only a genuine
+   API error on `sendRichMessage` does.
 3. `editMessageText` accepts `rich_message` and a real `message_id`. Correct
    for revising a persisted message. Wrong for finalizing a draft.
 4. `InputRichMessage`: exactly one of `html`, `markdown`, `blocks`. We emit
-   `html` only.
+   `html` only. Optional extras: `media` (ignored — we are not doing
+   media), `is_rtl` (unset), `skip_entity_detection` (**always `true`**,
+   a constant with a comment, not a config knob). Auto-linking file
+   paths, `/commands`, and `@names` would pop Telegram's "Open this
+   link?" alert.
 5. Raw newlines collapse to whitespace. Structure is tags. `<div>` is not
    supported. Named entities allowed: `&lt; &gt; &amp; &quot; &apos; &nbsp;
    &hellip; &mdash; &ndash; &lsquo; &rsquo; &ldquo; &rdquo;`. Everything else
@@ -158,8 +175,10 @@ emit). Caller treats that as a rich failure and falls back.
 `Sender.Send` is the one-shot path (what `bridgeservice` already calls):
 
 ```
-render → sendRichMessage(html) → on any error: sendMessage(original)
+render → sendRichMessage(html, skip_entity_detection=true) → genuine API error: sendMessage(original)
 ```
+
+One-shot never drafts, so chat privacy does not matter here.
 
 Streaming is a writer on the same type, driven by the CLI over the socket
 (see below). It is **not** implemented by chunking a complete string.
@@ -184,12 +203,30 @@ Draft flush policy:
 - Draft HTML may include `<tg-thinking>…</tg-thinking>` (truncated tail or
   a fixed "generating" marker). The persist call never includes it.
 
-On the first draft API error (including "not a private chat"), abandon the
-draft loop and fall back to `sendMessage` of the original accumulated text.
-Same if `sendRichMessage` fails after drafts were shown. Log the reason at
-`log.Printf` with the API description. Fallback uses the existing
-`sendChunk` / `SplitMessage` 4096 path. If fallback also fails, return that
-error — that is the only way a message is lost.
+Private vs not-private is decided at `OpenStream` (`getChat`, or a cached
+type from inbound updates). If the chat is not private, `Write` does not
+call draft; `Close` goes straight to `sendRichMessage`. If `getChat` is
+inconclusive and the first draft returns a "not a private chat" class of
+error, treat that the same way: stop drafting, persist on close. That
+path is **success-shaped**, not fallback.
+
+A genuine draft API error (anything other than not-private) abandons
+rich for this send and falls back to `sendMessage` of the original
+accumulated text. Same if `sendRichMessage` fails after drafts were
+shown. Log the reason at `log.Printf` with the API description.
+Fallback uses the existing `sendChunk` / `SplitMessage` 4096 path. If
+fallback also fails, return that error — that is the only way a
+message is lost.
+
+Call sites (do not share a return type):
+
+```go
+func (t *Telegram) sendRichDraft(ctx context.Context, draftID int64, html string) error
+func (t *Telegram) sendRichMessage(ctx context.Context, html string) (messageID int64, err error)
+```
+
+Every `InputRichMessage` we send sets `skip_entity_detection: true`
+(package-level constant). No `media`, no `is_rtl`.
 
 `editMessageText` is an internal method (`EditRich(ctx, messageID, text)`)
 used to revise a persisted message. v1 CLI does not expose it; `Send` /
@@ -226,10 +263,12 @@ cmd/send  --(stream)-->  bridgeservice  --Open/Write/Close-->  telegram
 
 Trigger fallback when **any** of these happen:
 
-- HTTP/API error from draft, persist, or edit
-- Draft refused because the chat is not private
+- Genuine HTTP/API error from draft, persist, or edit
 - `Render` error (over limit, internal)
 - Malformed markup rejected by the API
+
+Do **not** trigger fallback when the chat is not private. Skip drafts
+and persist with `sendRichMessage`.
 
 Fallback payload is the **original unmodified text**, never the rendered
 HTML. Log why. Tests must cover each failure point independently.
@@ -245,7 +284,9 @@ config dir (`setupFakeHome` / `config.CheckTestIsolation` from PR #9).
 | Property: every escaped text run round-trips through a tiny unescape of the legal set | `internal/bridge/richhtml/render_test.go` | `make test` |
 | httptest Bot API: one-shot calls **only** `sendRichMessage` with `rich_message.html` | `internal/bridge/telegram/rich_test.go` | `make test` |
 | httptest: stream is `N × sendRichMessageDraft` (same non-zero `draft_id`) then one `sendRichMessage` | `internal/bridge/telegram/rich_test.go` | `make test` |
-| httptest: each failure point (draft 4xx, persist 4xx, not-private, over-limit) issues `sendMessage` with original text | `internal/bridge/telegram/rich_test.go` | `make test` |
+| httptest: each genuine failure (draft 4xx, persist 4xx, over-limit) issues `sendMessage` with original text | `internal/bridge/telegram/rich_test.go` | `make test` |
+| httptest: non-private chat skips drafts, still calls `sendRichMessage` (no `sendMessage`) | `internal/bridge/telegram/rich_test.go` | `make test` |
+| Persist/draft payloads set `skip_entity_detection: true` | `internal/bridge/telegram/rich_test.go` | `make test` |
 | One-shot never emits a draft | `internal/bridge/telegram/rich_test.go` | `make test` |
 | `draft_id == 0` never sent | `internal/bridge/telegram/rich_test.go` | `make test` |
 | Persist HTML never contains `<tg-thinking>` | `internal/bridge/telegram/rich_test.go` | `make test` |
