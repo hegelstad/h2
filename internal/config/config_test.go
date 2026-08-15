@@ -29,6 +29,9 @@ func setupFakeHome(t *testing.T) string {
 	t.Setenv("H2_DIR", fakeRootDir)
 	ResetResolveCache()
 	t.Cleanup(ResetResolveCache)
+	if err := CheckTestIsolation(); err != nil {
+		t.Fatal(err)
+	}
 	return fakeHome
 }
 

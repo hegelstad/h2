@@ -34,6 +34,14 @@
   the user even though the limited agent itself cannot make model calls (the
   bridge is a separate process). Costs no model tokens.
 
+### Bug Fixes
+
+- **Test isolation guard**: `setupFakeHome` now points `H2_DIR` at a
+  temp h2 directory with a marker and fails the test if `ResolveDir`
+  still lands on the host config dir. Previously the helper set
+  `H2_DIR=""` and resolution walked up into the real tree, so tests
+  could reach a live Telegram socket.
+
 ## v0.3.2
 
 ### New Features
