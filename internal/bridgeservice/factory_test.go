@@ -105,3 +105,49 @@ func TestFromConfig_Empty(t *testing.T) {
 		t.Fatalf("expected 0 bridges, got %d", len(bridges))
 	}
 }
+
+func TestFromConfig_BotTokenEnvExpansion(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		env  map[string]string
+		want string
+	}{
+		{
+			name: "literal token passes through",
+			in:   "123456:ABC-DEF",
+			want: "123456:ABC-DEF",
+		},
+		{
+			name: "dollar-brace reference expands",
+			in:   "${H2_TEST_BOT_TOKEN}",
+			env:  map[string]string{"H2_TEST_BOT_TOKEN": "999:from-env"},
+			want: "999:from-env",
+		},
+		{
+			name: "unset reference expands to empty",
+			in:   "${H2_TEST_BOT_TOKEN_UNSET_XYZ}",
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			bridges := FromConfig(&config.BridgesConfig{
+				Telegram: &config.TelegramConfig{BotToken: tt.in, ChatID: 1},
+			})
+			if len(bridges) != 1 {
+				t.Fatalf("expected 1 bridge, got %d", len(bridges))
+			}
+			tg, ok := bridges[0].(*telegram.Telegram)
+			if !ok {
+				t.Fatal("expected *telegram.Telegram")
+			}
+			if tg.Token != tt.want {
+				t.Errorf("Token = %q, want %q", tg.Token, tt.want)
+			}
+		})
+	}
+}
