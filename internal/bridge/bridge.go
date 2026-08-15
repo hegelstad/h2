@@ -38,6 +38,7 @@ type TypingIndicator interface {
 // sendRichMessageDraft + <tg-thinking>).
 type ThinkingPreview interface {
 	ShowThinking(ctx context.Context) error
+	StopThinking()
 }
 
 var agentTagRe = regexp.MustCompile(`^\[([a-zA-Z0-9_-]+)\]\s*`)

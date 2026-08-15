@@ -516,6 +516,29 @@ func TestDraftIDSkipsZero(t *testing.T) {
 	}
 }
 
+func TestSend_HTMLPassthrough(t *testing.T) {
+	var got sendRichRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botTOKEN/sendRichMessage" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		json.NewDecoder(r.Body).Decode(&got)
+		json.NewEncoder(w).Encode(sendRichResponse{OK: true})
+	}))
+	defer srv.Close()
+	tg := &Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	in := "<p>hello <b>world</b></p>"
+	if err := tg.Send(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got.RichMessage.HTML != in {
+		t.Fatalf("html = %q, want passthrough", got.RichMessage.HTML)
+	}
+	if !got.RichMessage.SkipEntityDetection {
+		t.Fatal("skip_entity_detection")
+	}
+}
+
 func TestShowThinking_SendsDraft(t *testing.T) {
 	srv, calls := recordAPI(t, func(path string, body map[string]any) any {
 		return apiResponse{OK: true}

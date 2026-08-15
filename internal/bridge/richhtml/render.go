@@ -24,7 +24,29 @@ var (
 	ulItemRe = regexp.MustCompile(`^[-*] `)
 	olItemRe = regexp.MustCompile(`^\d+[.)] `)
 	fenceRe  = regexp.MustCompile("^```([A-Za-z0-9_+-]*)\\s*$")
+	// Documented Telegram rich-html tags (Bot API "Rich HTML style").
+	richHTMLTagRe = regexp.MustCompile(`(?i)<(p|br|h[1-6]|ul|ol|li|blockquote|aside|pre|hr|table|tr|td|th|caption|details|summary|figure|figcaption|footer|tg-collage|tg-slideshow|tg-math-block|tg-thinking|b|strong|i|em|u|ins|s|strike|del|code|mark|sub|sup|a|tg-spoiler|tg-emoji|tg-time|tg-math|tg-reference)(\s|/|>)`)
 )
+
+// LooksLikeRichHTML reports whether text already contains Telegram rich-html
+// tags. If so, Send must pass it through as InputRichMessage.html and not
+// run the plain-text renderer (which would escape the tags).
+func LooksLikeRichHTML(text string) bool {
+	return richHTMLTagRe.MatchString(text)
+}
+
+// HTML returns the InputRichMessage.html payload: passthrough if the
+// body is already Telegram HTML, otherwise a deterministic render of
+// plain text.
+func HTML(text string) (string, error) {
+	if LooksLikeRichHTML(text) {
+		if utf8.RuneCountInString(text) > maxChars {
+			return "", fmt.Errorf("rich html exceeds 32768 characters")
+		}
+		return text, nil
+	}
+	return Render(text, Options{})
+}
 
 var legalNamed = map[string]struct{}{
 	"lt": {}, "gt": {}, "amp": {}, "quot": {}, "apos": {},

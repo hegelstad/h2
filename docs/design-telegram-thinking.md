@@ -21,8 +21,9 @@ Telegram:     Thinking... disappears        ← no extra error bubble unless
 In a group or channel, Telegram **cannot** show that draft. You only get
 the small header “typing…” indicator. Same start/stop rules.
 
-Agents still write `h2 send telegram "plain text"`. They never mention
-drafts, HTML, or Thinking.
+The persisted answer is always `InputRichMessage.html` (never markdown
+or blocks). Agents may send Telegram-valid HTML, or plain text that we
+render into HTML. They never mention drafts or Thinking.
 
 ## Why this is not “edit the Thinking message into the answer”
 

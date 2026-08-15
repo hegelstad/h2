@@ -52,6 +52,9 @@ type Telegram struct {
 	draftSeq atomic.Int64
 	streamMu sync.Mutex
 	chatType string
+
+	thinking         bool
+	stopThinkRefresh func()
 }
 
 func (t *Telegram) Name() string { return "telegram" }

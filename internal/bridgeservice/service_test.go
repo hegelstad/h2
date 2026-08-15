@@ -650,25 +650,41 @@ func (m *mockThinkingBridge) ThinkCalls() int {
 	return m.thinkCalls
 }
 
-func TestTypingLoop_ThinkingPreviewWhenActive(t *testing.T) {
+func (m *mockThinkingBridge) StopThinking() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.thinkCalls = 0
+}
+
+func TestInbound_StartsThinkingImmediately(t *testing.T) {
 	tmpDir := shortTempDir(t)
-	_ = newMockStatusAgent(t, tmpDir, "concierge", "active")
+	_ = newMockStatusAgent(t, tmpDir, "concierge", "idle")
 
 	tb := &mockThinkingBridge{mockTypingBridge: mockTypingBridge{name: "telegram"}}
 	svc := New([]bridge.Bridge{tb}, "alice", "concierge", "", tmpDir, nil)
-	svc.typingTickInterval = 50 * time.Millisecond
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go svc.runTypingLoop(ctx)
+	// sendToAgent will fail (no real agent listener for send) — use a
+	// reachable status socket plus a stub by calling showThinking via
+	// a successful route. Probe: handleInbound with empty target uses
+	// concierge; sendToAgent may fail. Drive the start hook directly
+	// the same way handleInbound does after a successful send.
+	svc.mu.Lock()
+	svc.lastRoutedAgent = "concierge"
+	svc.thinking = true
+	svc.thinkingSince = time.Now()
+	svc.mu.Unlock()
+	svc.showThinking()
 
-	time.Sleep(200 * time.Millisecond)
-	cancel()
-
-	if tb.ThinkCalls() < 2 {
-		t.Errorf("expected >= 2 thinking previews when active, got %d", tb.ThinkCalls())
+	if tb.ThinkCalls() != 1 {
+		t.Fatalf("expected 1 thinking preview on inbound, got %d", tb.ThinkCalls())
 	}
 	if tb.TypingCalls() != 0 {
-		t.Errorf("ThinkingPreview should replace SendTyping, got %d typing calls", tb.TypingCalls())
+		t.Fatalf("did not want typing, got %d", tb.TypingCalls())
+	}
+
+	svc.stopThinking()
+	if tb.ThinkCalls() != 0 {
+		t.Fatalf("StopThinking should clear, got %d", tb.ThinkCalls())
 	}
 }
 

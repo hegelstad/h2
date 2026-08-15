@@ -194,6 +194,39 @@ func TestRender_OverBlockLimit(t *testing.T) {
 	}
 }
 
+func TestLooksLikeRichHTML(t *testing.T) {
+	if !LooksLikeRichHTML("<p>hello</p>") {
+		t.Fatal("expected <p> to count as rich html")
+	}
+	if !LooksLikeRichHTML("<b>bold</b>") {
+		t.Fatal("expected <b> to count as rich html")
+	}
+	if LooksLikeRichHTML("hello **bold**") {
+		t.Fatal("plain text must not look like rich html")
+	}
+}
+
+func TestHTML_Passthrough(t *testing.T) {
+	in := "<p>hello <b>world</b></p>"
+	got, err := HTML(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != in {
+		t.Fatalf("passthrough = %q, want original html", got)
+	}
+}
+
+func TestHTML_RendersPlain(t *testing.T) {
+	got, err := HTML("hello\nworld")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "<p>hello<br>world</p>" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestRender_EscapedLegalEntitiesRoundTrip(t *testing.T) {
 	in := "a < b & c > d &nbsp; `x` **y**"
 	got, err := Render(in, Options{})

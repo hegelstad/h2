@@ -37,11 +37,14 @@ const (
 // One-shot never drafts. Any genuine render or persist error falls back
 // to plain sendMessage of the original unmodified text.
 func (t *Telegram) Send(ctx context.Context, text string) error {
+	t.StopThinking()
 	t.streamMu.Lock()
 	defer t.streamMu.Unlock()
-	html, err := richhtml.Render(text, richhtml.Options{})
+	// Always InputRichMessage.html. Caller HTML is passed through;
+	// plain text is rendered. Never markdown or blocks.
+	html, err := richhtml.HTML(text)
 	if err != nil {
-		log.Printf("telegram rich render: %v; falling back to sendMessage", err)
+		log.Printf("telegram rich html: %v; falling back to sendMessage", err)
 		return t.sendPlain(ctx, text)
 	}
 	if _, err := t.sendRichMessage(ctx, html); err != nil {
@@ -97,6 +100,27 @@ func (t *Telegram) nextDraftID() int64 {
 // it falls back to the normal typing chat action. Same draft_id so
 // refreshes animate instead of stacking.
 func (t *Telegram) ShowThinking(ctx context.Context) error {
+	t.mu.Lock()
+	t.thinking = true
+	t.mu.Unlock()
+	if err := t.postThinking(ctx); err != nil {
+		return err
+	}
+	t.armThinkingRefresh()
+	return nil
+}
+
+func (t *Telegram) StopThinking() {
+	t.mu.Lock()
+	t.thinking = false
+	if t.stopThinkRefresh != nil {
+		t.stopThinkRefresh()
+		t.stopThinkRefresh = nil
+	}
+	t.mu.Unlock()
+}
+
+func (t *Telegram) postThinking(ctx context.Context) error {
 	if !t.chatIsPrivate(ctx) {
 		return t.SendTyping(ctx)
 	}
@@ -106,6 +130,28 @@ func (t *Telegram) ShowThinking(ctx context.Context) error {
 		return t.SendTyping(ctx)
 	}
 	return nil
+}
+
+func (t *Telegram) armThinkingRefresh() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopThinkRefresh != nil {
+		t.stopThinkRefresh()
+		t.stopThinkRefresh = nil
+	}
+	if !t.thinking {
+		return
+	}
+	t.stopThinkRefresh = t.clk().AfterFunc(draftRefresh, func() {
+		t.mu.Lock()
+		on := t.thinking
+		t.mu.Unlock()
+		if !on {
+			return
+		}
+		_ = t.postThinking(context.Background())
+		t.armThinkingRefresh()
+	})
 }
 
 type inputRichMessage struct {
