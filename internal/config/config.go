@@ -183,10 +183,25 @@ func LoadFrom(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
+	cfg.expandEnv()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// expandEnv resolves ${VAR} / $VAR in secret-bearing config fields so the
+// token can live in the process environment instead of the yaml file.
+func (c *Config) expandEnv() {
+	if c == nil {
+		return
+	}
+	for _, bc := range c.Bridges {
+		if bc == nil || bc.Telegram == nil {
+			continue
+		}
+		bc.Telegram.BotToken = os.ExpandEnv(bc.Telegram.BotToken)
+	}
 }
 
 var allowedCommandRe = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)

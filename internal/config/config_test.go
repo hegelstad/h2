@@ -78,6 +78,30 @@ users:
 	}
 }
 
+func TestLoadFrom_ExpandsBotTokenEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `bridges:
+  personal:
+    telegram:
+      bot_token: "${H2_TEST_BOT_TOKEN}"
+      chat_id: 1
+`
+	if err := os.WriteFile(path, []byte(yaml), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("H2_TEST_BOT_TOKEN", "env-token-value")
+
+	cfg, err := LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	got := cfg.Bridges["personal"].Telegram.BotToken
+	if got != "env-token-value" {
+		t.Fatalf("bot_token = %q, want env-token-value", got)
+	}
+}
+
 func TestLoadFrom_MissingFile(t *testing.T) {
 	cfg, err := LoadFrom("/nonexistent/path/config.yaml")
 	if err != nil {
