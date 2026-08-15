@@ -69,6 +69,10 @@ implement RichSender.`,
 				return fmt.Errorf("message body is required (provide as arguments or --file)")
 			}
 
+			if err := validateRichHTMLBody(format, body); err != nil {
+				return err
+			}
+
 			if priority == "" {
 				priority = "normal"
 			}
@@ -176,6 +180,16 @@ func validateFormat(format string) error {
 	return fmt.Errorf("invalid --format %q (must be HTML, MarkdownV2, rich, or rich-html)", format)
 }
 
+// validateRichHTMLBody rejects a rich-html body that has line breaks but no
+// block-level tags. Telegram collapses raw newlines to spaces, so such a
+// body would render as a wall of text. Hard error, no rewrite.
+func validateRichHTMLBody(format, body string) error {
+	if format != "rich-html" {
+		return nil
+	}
+	return bridge.ValidateRichHTML(body)
+}
+
 // registerExpectsResponseTrigger registers an idle reminder trigger on the
 // recipient's daemon. Retries once on ID collision. Returns the final trigger
 // ID used (which may differ from the input on collision retry).
@@ -270,6 +284,10 @@ func handleCloses(triggerID string, args []string, file, priority, format string
 	// If body is present, target must be present.
 	if body != "" && name == "" {
 		return fmt.Errorf("target agent name is required when sending a response body")
+	}
+
+	if err := validateRichHTMLBody(format, body); err != nil {
+		return err
 	}
 
 	// Send the response message first (if body present).

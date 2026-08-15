@@ -21,6 +21,13 @@
   allows. Rich bodies may be up to 32768 characters. Bridges that do not
   implement `RichSender` reject the flag with a clear error (no silent
   fallback).
+- **rich-html newline guard**: `h2 send --format rich-html` now rejects
+  bodies that contain line breaks but no block-level HTML tags (`<p>`,
+  `<br>`, `<ul><li>`, `<blockquote>`, …). Telegram's `sendRichMessage`
+  collapses raw newlines to spaces, so a multiline body without block
+  tags rendered as an unreadable wall of text. The CLI errors before
+  delivery (no silent rewrite), matching the no-fallback stance of the
+  other `--format` flags.
 - **Inbound Telegram media**: Photos and documents sent to the Telegram bridge
   are downloaded to `$H2_DIR/media/telegram/` and handed to the receiving agent
   as a message containing the caption plus the saved local file path, so the

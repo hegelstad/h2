@@ -189,6 +189,77 @@ func TestValidateFormat(t *testing.T) {
 	}
 }
 
+// setupIsolatedSendHome pins H2_DIR to a temp h2 tree so send tests cannot
+// walk up into the real sockets dir (e.g. $H2_DIR/sockets/bridge.telegram.sock).
+func setupIsolatedSendHome(t *testing.T) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	h2Dir := filepath.Join(tmpDir, ".h2")
+	if err := os.MkdirAll(h2Dir, 0o700); err != nil {
+		t.Fatalf("mkdir h2 dir: %v", err)
+	}
+	if err := config.WriteMarker(h2Dir); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	t.Setenv("HOME", tmpDir)
+	t.Setenv("H2_DIR", h2Dir)
+	t.Setenv("H2_ROOT_DIR", h2Dir)
+	t.Setenv("H2_ACTOR", "sender")
+	config.ResetResolveCache()
+	socketdir.ResetDirCache()
+	t.Cleanup(func() {
+		config.ResetResolveCache()
+		socketdir.ResetDirCache()
+	})
+}
+
+func TestSend_RichHTMLRejectsNewlinesWithoutBlockTags(t *testing.T) {
+	setupIsolatedSendHome(t)
+
+	bodyFile := filepath.Join(t.TempDir(), "body.html")
+	if err := os.WriteFile(bodyFile, []byte("<b>bold</b>\n<code>code</code>\nplain"), 0o644); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	cmd := newSendCmd()
+	cmd.SetArgs([]string{"telegram", "--format", "rich-html", "--file", bodyFile})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected rich-html validation error, got nil")
+	}
+	if !strings.Contains(err.Error(), "rich-html body has line breaks but no block tags") {
+		t.Fatalf("expected rich-html block-tag error, got: %v", err)
+	}
+	// Must fail before socket lookup so a missing target cannot mask the guard.
+	if strings.Contains(err.Error(), "connect") || strings.Contains(err.Error(), "socket") {
+		t.Fatalf("validation should reject before dial, got: %v", err)
+	}
+}
+
+func TestSend_RichHTMLAllowsNewlinesWithBlockTags(t *testing.T) {
+	setupIsolatedSendHome(t)
+
+	bodyFile := filepath.Join(t.TempDir(), "body.html")
+	if err := os.WriteFile(bodyFile, []byte("<p>hello</p>\n<p>world</p>"), 0o644); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	cmd := newSendCmd()
+	cmd.SetArgs([]string{"telegram", "--format", "rich-html", "--file", bodyFile})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected socket error after validation passed, got nil")
+	}
+	if strings.Contains(err.Error(), "rich-html body has line breaks but no block tags") {
+		t.Fatalf("block tags should pass the guard, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "socket") && !strings.Contains(err.Error(), "no socket found") {
+		t.Fatalf("expected socket/connection error after guard passed, got: %v", err)
+	}
+}
+
 func TestSend_FormatFlagRejectsInvalidBeforeDial(t *testing.T) {
 	tmpDir := t.TempDir()
 	os.MkdirAll(filepath.Join(tmpDir, ".h2", "sockets"), 0o700)

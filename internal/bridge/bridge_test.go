@@ -1,8 +1,93 @@
 package bridge
 
 import (
+	"strings"
 	"testing"
 )
+
+func TestValidateRichHTML(t *testing.T) {
+	const wantErrSubstr = "rich-html body has line breaks but no block tags"
+
+	tests := []struct {
+		name    string
+		text    string
+		wantErr bool
+	}{
+		{
+			name:    "single-line body with no tags",
+			text:    "hello telegram",
+			wantErr: false,
+		},
+		{
+			name:    "newlines with no tags",
+			text:    "hello\nworld",
+			wantErr: true,
+		},
+		{
+			name:    "newlines plus br",
+			text:    "hello<br>\nworld",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus ul li",
+			text:    "<ul>\n<li>one</li>\n<li>two</li>\n</ul>",
+			wantErr: false,
+		},
+		{
+			name:    "newlines plus only inline tags",
+			text:    "<b>bold</b>\n<code>code</code>\n<a href=\"x\">link</a>",
+			wantErr: true,
+		},
+		{
+			name:    "uppercase BR",
+			text:    "hello<BR>\nworld",
+			wantErr: false,
+		},
+		{
+			// Substring / opening-tag rule, not a full HTML parse: a
+			// tag-lookalike in prose still counts as a block tag.
+			name:    "tag-lookalike in prose",
+			text:    "use <br> to break\nlines",
+			wantErr: false,
+		},
+		{
+			name:    "self-closing br",
+			text:    "hello<br/>\nworld",
+			wantErr: false,
+		},
+		{
+			name:    "closing tag only is not a block tag",
+			text:    "hello</p>\nworld",
+			wantErr: true,
+		},
+		{
+			name:    "empty body",
+			text:    "",
+			wantErr: false,
+		},
+		{
+			name:    "single line with inline tags",
+			text:    "<b>bold</b> and <code>code</code>",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRichHTML(tt.text)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateRichHTML(%q) = nil, want error", tt.text)
+				}
+				if !strings.Contains(err.Error(), wantErrSubstr) {
+					t.Fatalf("ValidateRichHTML(%q) error = %v, want substring %q", tt.text, err, wantErrSubstr)
+				}
+			} else if err != nil {
+				t.Fatalf("ValidateRichHTML(%q) = %v, want nil", tt.text, err)
+			}
+		})
+	}
+}
 
 func TestParseAgentPrefix(t *testing.T) {
 	tests := []struct {
