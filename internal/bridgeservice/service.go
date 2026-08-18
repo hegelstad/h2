@@ -212,6 +212,12 @@ func (s *Service) handleInbound(targetAgent, body string) {
 	s.lastActivityTime = time.Now()
 	s.mu.Unlock()
 	target := targetAgent
+	deliverBody := body
+	if target != "" && !s.agentExists(target) {
+		// "note:" / "troubleshoot:" is ordinary prose, not an address.
+		deliverBody = target + ": " + body
+		target = ""
+	}
 	if target == "" {
 		target = s.resolveDefaultTarget()
 	}
@@ -221,7 +227,7 @@ func (s *Service) handleInbound(targetAgent, body string) {
 		return
 	}
 	log.Printf("bridge: routing inbound to %s", target)
-	if err := s.sendToAgent(target, s.name, body); err != nil {
+	if err := s.sendToAgent(target, s.name, deliverBody); err != nil {
 		log.Printf("bridge: send to agent %s: %v", target, err)
 		s.replyError(fmt.Sprintf("%s agent is not running, unable to deliver message.", target))
 	} else {
@@ -674,6 +680,23 @@ func (s *Service) buildBridgeInfo() *message.BridgeInfo {
 		MessagesReceived: received,
 		LastActivity:     lastActivityStr,
 	}
+}
+
+// agentExists reports whether an agent socket is present in the socket
+// directory. This is the same discovery firstAvailableAgent uses: a
+// name is an address only if that socket exists. We do not dial here,
+// so a transient delivery failure is not turned into a silent reroute.
+func (s *Service) agentExists(name string) bool {
+	agents, err := socketdir.ListByTypeIn(s.socketDir, socketdir.TypeAgent)
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveDefaultTarget returns the agent to route un-addressed inbound messages to.

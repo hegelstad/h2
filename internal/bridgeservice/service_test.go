@@ -357,8 +357,62 @@ func TestHandleInbound_ExplicitDeadAgentRepliesWithError(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 error reply, got %d", len(msgs))
 	}
-	if msgs[0] != "foo agent is not running, unable to deliver message." {
+	if msgs[0] != "No agents are running, unable to deliver message." {
 		t.Errorf("unexpected reply: %q", msgs[0])
+	}
+}
+
+func TestHandleInbound_UnknownPrefixFallsBackToDefault(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	sender := &mockSender{name: "telegram"}
+	svc := New([]bridge.Bridge{sender}, "alice", "concierge", "", tmpDir, nil)
+	svc.conciergeAlive = true
+
+	svc.handleInbound("troubleshoot", "hjelp meg")
+
+	if msgs := sender.Messages(); len(msgs) != 0 {
+		t.Fatalf("did not want an error reply, got %v", msgs)
+	}
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "troubleshoot: hjelp meg" {
+		t.Errorf("body = %q, want original text with prefix restored", reqs[0].Body)
+	}
+}
+
+func TestHandleInbound_KnownPrefixStillStripped(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
+
+	svc.handleInbound("concierge", "hei")
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "hei" {
+		t.Errorf("body = %q, want prefix stripped", reqs[0].Body)
+	}
+}
+
+func TestHandleInbound_MidSentenceColonUnchanged(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
+	svc.conciergeAlive = true
+
+	svc.handleInbound("", "see note: later today")
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "see note: later today" {
+		t.Errorf("body = %q, want unchanged", reqs[0].Body)
 	}
 }
 
