@@ -275,6 +275,104 @@ func TestHandleStdinSend_FallsBackWhenStreamUnknown(t *testing.T) {
 	}
 }
 
+func TestHandleStdinSend_NewDaemonWritesInChunks(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	sockDir := socketdir.Dir()
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(sockDir, socketdir.Format(socketdir.TypeAgent, "new-agent"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	var mu sync.Mutex
+	var writes []string
+	var sawOrdinary bool
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, rerr := message.ReadRequest(conn)
+			if rerr != nil {
+				conn.Close()
+				continue
+			}
+			switch req.Type {
+			case "send_stream_open":
+				_ = message.SendResponse(conn, &message.Response{OK: true, StreamID: "s1"})
+			case "send_stream_write":
+				mu.Lock()
+				writes = append(writes, req.Body)
+				mu.Unlock()
+				_ = message.SendResponse(conn, &message.Response{OK: true})
+			case "send_stream_close":
+				_ = message.SendResponse(conn, &message.Response{OK: true, MessageID: "streamed"})
+			case "send":
+				mu.Lock()
+				sawOrdinary = true
+				mu.Unlock()
+				_ = message.SendResponse(conn, &message.Response{OK: true})
+			default:
+				_ = message.SendResponse(conn, &message.Response{Error: "unexpected " + req.Type})
+			}
+			conn.Close()
+		}
+	}()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	payload := strings.Repeat("x", 5000)
+	if _, err := io.WriteString(w, payload); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	if err := handleStdinSend("new-agent", true); err != nil {
+		t.Fatalf("handleStdinSend: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), writes...)
+	fellBack := sawOrdinary
+	mu.Unlock()
+	if fellBack {
+		t.Fatal("new daemon must not fall back to ordinary send")
+	}
+	if len(got) < 2 {
+		t.Fatalf("writes = %d, want at least 2 chunks, sizes=%v", len(got), chunkSizes(got))
+	}
+	var joined strings.Builder
+	for _, c := range got {
+		if len(c) > 4096 {
+			t.Fatalf("chunk len %d exceeds 4096", len(c))
+		}
+		joined.WriteString(c)
+	}
+	if joined.String() != payload {
+		t.Fatalf("joined writes != payload (got %d bytes)", joined.Len())
+	}
+}
+
+func chunkSizes(chunks []string) []int {
+	out := make([]int, len(chunks))
+	for i, c := range chunks {
+		out[i] = len(c)
+	}
+	return out
+}
+
 func TestIsUnknownRequestType(t *testing.T) {
 	if !isUnknownRequestType("unknown request type: send_stream_open") {
 		t.Fatal("should match listener wording")

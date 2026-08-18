@@ -158,57 +158,60 @@ func handleStdinSend(name string, allowSelf bool) error {
 			return fmt.Errorf("cannot send a message to yourself (%s); use --allow-self to override", name)
 		}
 	}
-	body, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return fmt.Errorf("read stdin: %w", err)
-	}
-	text := string(body)
 
+	// Probe first, before reading stdin. An old daemon rejects
+	// send_stream_open with "unknown request type"; matching that
+	// string is the transitional handshake. A real version field
+	// is not worth it for one skew case.
 	open, err := sendSocketRequest(name, &message.Request{Type: "send_stream_open", From: from})
 	if err != nil {
 		return err
 	}
 	if !open.OK {
 		if isUnknownRequestType(open.Error) {
-			return sendOrdinary(name, from, text)
+			body, rerr := io.ReadAll(os.Stdin)
+			if rerr != nil {
+				return fmt.Errorf("read stdin: %w", rerr)
+			}
+			return sendOrdinary(name, from, string(body))
 		}
 		return fmt.Errorf("stream open: %s", open.Error)
 	}
 
-	wrote := false
-	if text != "" {
-		resp, werr := sendSocketRequest(name, &message.Request{
-			Type:     "send_stream_write",
-			From:     from,
-			Body:     text,
-			StreamID: open.StreamID,
-		})
-		if werr != nil {
-			return werr
-		}
-		if !resp.OK {
-			if isUnknownRequestType(resp.Error) {
-				return sendOrdinary(name, from, text)
+	streamID := open.StreamID
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := os.Stdin.Read(buf)
+		if n > 0 {
+			resp, werr := sendSocketRequest(name, &message.Request{
+				Type:     "send_stream_write",
+				From:     from,
+				Body:     string(buf[:n]),
+				StreamID: streamID,
+			})
+			if werr != nil {
+				return werr
 			}
-			return fmt.Errorf("stream write: %s", resp.Error)
+			if !resp.OK {
+				return fmt.Errorf("stream write: %s", resp.Error)
+			}
 		}
-		wrote = true
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read stdin: %w", readErr)
+		}
 	}
 	closeResp, err := sendSocketRequest(name, &message.Request{
 		Type:     "send_stream_close",
 		From:     from,
-		StreamID: open.StreamID,
+		StreamID: streamID,
 	})
 	if err != nil {
 		return err
 	}
 	if !closeResp.OK {
-		if isUnknownRequestType(closeResp.Error) {
-			if wrote {
-				return nil
-			}
-			return sendOrdinary(name, from, text)
-		}
 		return fmt.Errorf("stream close: %s", closeResp.Error)
 	}
 	if closeResp.MessageID != "" {
