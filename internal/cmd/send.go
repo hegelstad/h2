@@ -158,51 +158,84 @@ func handleStdinSend(name string, allowSelf bool) error {
 			return fmt.Errorf("cannot send a message to yourself (%s); use --allow-self to override", name)
 		}
 	}
+	body, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	text := string(body)
+
 	open, err := sendSocketRequest(name, &message.Request{Type: "send_stream_open", From: from})
 	if err != nil {
 		return err
 	}
 	if !open.OK {
+		if isUnknownRequestType(open.Error) {
+			return sendOrdinary(name, from, text)
+		}
 		return fmt.Errorf("stream open: %s", open.Error)
 	}
-	streamID := open.StreamID
-	buf := make([]byte, 4096)
-	for {
-		n, readErr := os.Stdin.Read(buf)
-		if n > 0 {
-			resp, werr := sendSocketRequest(name, &message.Request{
-				Type:     "send_stream_write",
-				From:     from,
-				Body:     string(buf[:n]),
-				StreamID: streamID,
-			})
-			if werr != nil {
-				return werr
+
+	wrote := false
+	if text != "" {
+		resp, werr := sendSocketRequest(name, &message.Request{
+			Type:     "send_stream_write",
+			From:     from,
+			Body:     text,
+			StreamID: open.StreamID,
+		})
+		if werr != nil {
+			return werr
+		}
+		if !resp.OK {
+			if isUnknownRequestType(resp.Error) {
+				return sendOrdinary(name, from, text)
 			}
-			if !resp.OK {
-				return fmt.Errorf("stream write: %s", resp.Error)
-			}
+			return fmt.Errorf("stream write: %s", resp.Error)
 		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("read stdin: %w", readErr)
-		}
+		wrote = true
 	}
 	closeResp, err := sendSocketRequest(name, &message.Request{
 		Type:     "send_stream_close",
 		From:     from,
-		StreamID: streamID,
+		StreamID: open.StreamID,
 	})
 	if err != nil {
 		return err
 	}
 	if !closeResp.OK {
+		if isUnknownRequestType(closeResp.Error) {
+			if wrote {
+				return nil
+			}
+			return sendOrdinary(name, from, text)
+		}
 		return fmt.Errorf("stream close: %s", closeResp.Error)
 	}
 	if closeResp.MessageID != "" {
 		fmt.Println(closeResp.MessageID)
+	}
+	return nil
+}
+
+func isUnknownRequestType(err string) bool {
+	return strings.Contains(err, "unknown request type")
+}
+
+func sendOrdinary(name, from, body string) error {
+	resp, err := sendSocketRequest(name, &message.Request{
+		Type:     "send",
+		Priority: "normal",
+		From:     from,
+		Body:     body,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("send failed: %s", resp.Error)
+	}
+	if resp.MessageID != "" {
+		fmt.Println(resp.MessageID)
 	}
 	return nil
 }

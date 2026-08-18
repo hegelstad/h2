@@ -1,10 +1,16 @@
 package cmd
 
 import (
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"h2/internal/session/message"
+	"h2/internal/socketdir"
 )
 
 func TestSendCmd_SelfSendBlocked(t *testing.T) {
@@ -177,6 +183,104 @@ func TestSend_StdinTTYRejected(t *testing.T) {
 		!strings.Contains(err.Error(), "socket") && !strings.Contains(err.Error(), "connect") &&
 		!strings.Contains(err.Error(), "stream") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleStdinSend_FallsBackWhenStreamUnknown(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	sockDir := socketdir.Dir()
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(sockDir, socketdir.Format(socketdir.TypeAgent, "old-agent"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	var mu sync.Mutex
+	var got []message.Request
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, rerr := message.ReadRequest(conn)
+			if rerr != nil {
+				conn.Close()
+				continue
+			}
+			mu.Lock()
+			got = append(got, *req)
+			mu.Unlock()
+			switch req.Type {
+			case "send_stream_open", "send_stream_write", "send_stream_close":
+				_ = message.SendResponse(conn, &message.Response{
+					Error: "unknown request type: " + req.Type,
+				})
+			case "send":
+				_ = message.SendResponse(conn, &message.Response{OK: true, MessageID: "fallback-id"})
+			default:
+				_ = message.SendResponse(conn, &message.Response{Error: "unknown request type: " + req.Type})
+			}
+			conn.Close()
+		}
+	}()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	wantBody := "troubleshoot: full stdin body\nline two"
+	if _, err := io.WriteString(w, wantBody); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	if err := handleStdinSend("old-agent", true); err != nil {
+		t.Fatalf("handleStdinSend: %v", err)
+	}
+
+	mu.Lock()
+	reqs := append([]message.Request(nil), got...)
+	mu.Unlock()
+	var sawOpen, sawSend bool
+	for _, req := range reqs {
+		switch req.Type {
+		case "send_stream_open":
+			sawOpen = true
+		case "send":
+			sawSend = true
+			if req.Body != wantBody {
+				t.Fatalf("send body = %q, want %q", req.Body, wantBody)
+			}
+		case "send_stream_write", "send_stream_close":
+			t.Fatalf("must not continue the stream protocol after unknown open, got %s", req.Type)
+		}
+	}
+	if !sawOpen {
+		t.Fatal("expected a send_stream_open probe")
+	}
+	if !sawSend {
+		t.Fatalf("expected ordinary send fallback, requests=%+v", reqs)
+	}
+}
+
+func TestIsUnknownRequestType(t *testing.T) {
+	if !isUnknownRequestType("unknown request type: send_stream_open") {
+		t.Fatal("should match listener wording")
+	}
+	if isUnknownRequestType("stream open: boom") {
+		t.Fatal("must not treat other errors as version skew")
 	}
 }
 
