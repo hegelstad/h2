@@ -10,11 +10,17 @@ import (
 )
 
 // Collector derives state from child PTY output.
-// It goes active on each SignalOutput signal and idle after the configured
-// threshold with no further output.
+// It goes active on the first SignalOutput signal and idle after the configured
+// threshold with no further output. State updates are emitted only on genuine
+// transitions (idle->active, active->idle); repeated output while already
+// active does not re-emit active — it only defers the idle timer. This keeps a
+// chatty child (e.g. a streaming CLI that writes output many times a second)
+// from flooding the event stream with duplicate "active" updates, which
+// previously ballooned the per-agent event log and OOM-killed the harness.
 type Collector struct {
 	idleThreshold time.Duration
 	notifyCh      chan struct{}
+	interruptCh   chan struct{}
 	stateCh       chan monitor.StateUpdate
 	stopCh        chan struct{}
 }
@@ -24,6 +30,7 @@ func New(idleThreshold time.Duration) *Collector {
 	c := &Collector{
 		idleThreshold: idleThreshold,
 		notifyCh:      make(chan struct{}, 1),
+		interruptCh:   make(chan struct{}, 1),
 		stateCh:       make(chan monitor.StateUpdate, 1),
 		stopCh:        make(chan struct{}),
 	}
@@ -39,9 +46,14 @@ func (c *Collector) SignalOutput() {
 	}
 }
 
-// SignalInterrupt forces an immediate idle state update.
+// SignalInterrupt forces an idle transition (e.g. on local Ctrl+C). It is
+// routed through the run loop so state tracking stays consistent; if the
+// collector is already idle it is a no-op.
 func (c *Collector) SignalInterrupt() {
-	c.send(monitor.StateIdle)
+	select {
+	case c.interruptCh <- struct{}{}:
+	default:
+	}
 }
 
 // StateCh returns the channel that receives state updates.
@@ -62,13 +74,26 @@ func (c *Collector) run() {
 	idleTimer := time.NewTimer(c.idleThreshold)
 	defer idleTimer.Stop()
 
+	// current tracks the last emitted state so we only send on transitions.
+	// The collector starts idle; the first output emits the idle->active edge.
+	current := monitor.StateIdle
+	setState := func(s monitor.State) {
+		if s == current {
+			return
+		}
+		current = s
+		c.send(s)
+	}
+
 	for {
 		select {
 		case <-c.notifyCh:
-			c.send(monitor.StateActive)
+			setState(monitor.StateActive)
 			resetTimer(idleTimer, c.idleThreshold)
+		case <-c.interruptCh:
+			setState(monitor.StateIdle)
 		case <-idleTimer.C:
-			c.send(monitor.StateIdle)
+			setState(monitor.StateIdle)
 		case <-c.stopCh:
 			return
 		}
