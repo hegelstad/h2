@@ -204,24 +204,24 @@ func TestStart_ActiveThenIdleFromScreen(t *testing.T) {
 		t.Fatalf("first emit = %v, want Active", got)
 	}
 	// Screen reaches the idle prompt -> harness should declare Idle.
-	fs.set("❯ \nGrok 4.6 (xhigh) · always-approve\n")
+	fs.set(miniIdleScreen)
 	waitForState(t, events, monitor.StateIdle)
 }
 
 // A turn indicator on screen flips the harness back to Active.
 func TestStart_IdleThenActiveOnTurn(t *testing.T) {
-	fs := &fakeScreen{text: "❯ \nGrok 4.6\n"}
+	fs := &fakeScreen{text: miniIdleScreen}
 	_, events, cancel := startHarness(t, fs.get)
 	defer cancel()
 
 	waitForState(t, events, monitor.StateIdle)
-	fs.set("Grok 4.6\nWaiting for response… 1.2s [stop]\n")
+	fs.set(miniActiveScreen)
 	waitForState(t, events, monitor.StateActive)
 }
 
 // HandleInterrupt forces an immediate Idle even while a turn indicator shows.
 func TestHandleInterrupt_ForcesIdle(t *testing.T) {
-	fs := &fakeScreen{text: "Grok\nWaiting for response… [stop]\n"}
+	fs := &fakeScreen{text: miniActiveScreen}
 	h, events, cancel := startHarness(t, fs.get)
 	defer cancel()
 
@@ -237,12 +237,13 @@ func TestHandleInterrupt_ForcesIdle(t *testing.T) {
 
 // An unrecognized screen must hold the last known state (no spurious flip).
 func TestStart_UnknownHoldsLastState(t *testing.T) {
-	fs := &fakeScreen{text: "❯ \nGrok 4.6\n"}
+	fs := &fakeScreen{text: miniIdleScreen}
 	_, events, cancel := startHarness(t, fs.get)
 	defer cancel()
 
 	waitForState(t, events, monitor.StateIdle)
-	// Garbage screen with no known markers: state must remain Idle (no event).
+	// Garbage screen with no input box: classifies unknown, state must remain
+	// Idle (no event).
 	fs.set("qwertyuiop zxcvbnm\n")
 	select {
 	case ev := <-events:

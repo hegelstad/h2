@@ -10,18 +10,25 @@
   clock), so it never goes output-silent — the previous ptycollector-based
   detector could therefore never report idle, and normal-priority inter-agent
   messages (including `--expects-response` replies) were never delivered. State
-  is now classified from the TUI's own indicators (`Waiting for response` /
-  `[stop]` = active; grok prompt chrome, no active marker = idle), with a
-  debounce and an unknown-screen fallback that holds last state and logs. The
-  submit path (`text` + 50ms + `\r`) is unchanged. Marker strings are centralized
-  in `harness/grok/classify.go` and pinned against real captured screen frames.
+  is now classified from the TUI's own indicators, scoped by REGION so marker
+  text appearing in the conversation transcript (a user quoting a marker, grok's
+  reply containing `[stop]`, grok viewing `classify.go` itself) can never pin the
+  agent Active: `Waiting for response` / `[stop]` are honored only on the status
+  line above the input box and only when an animated braille spinner co-occurs
+  there, and `Esc:cancel` only in the footer below the box. Idle is debounced and
+  an unrecognized screen holds last state and logs. The submit path (`text` +
+  50ms + `\r`) is unchanged, and a Ctrl+C-forced idle is briefly protected from a
+  still-painted turn marker undoing it. Markers are centralized in
+  `harness/grok/classify.go` and pinned against real captured screen frames
+  (idle-at-prompt, composing, active, and multi-line-active).
 
 ### Internal
 
 - New `harness.ScreenReader` seam and `VT.ScreenText()` accessor let a harness
   read the live rendered screen; wired by the session for screen-state harnesses.
 - New on-demand live smoke test (`e2etests`, build tag `grok_live`) drives real
-  grok through the VT + classifier + submit path end to end.
+  grok through the VT + classifier + submit path end to end, plus a frame-capture
+  tool (build tag `grok_capture`) to regenerate the classifier fixtures.
 
 ## v0.3.2
 

@@ -44,6 +44,12 @@ const (
 	unknownStartupGrace = 5 * time.Second
 	// unknownLogInterval rate-limits the unknown-screen warning.
 	unknownLogInterval = 60 * time.Second
+	// forceIdleSuppression is how long after a HandleInterrupt-forced idle the
+	// loop refuses to flip back to Active off a still-painted turn marker. The
+	// interrupt takes a beat to tear down grok's turn UI, so without this the
+	// very next poll could re-read the stale spinner and immediately undo the
+	// forced idle. A few poll intervals is enough.
+	forceIdleSuppression = 500 * time.Millisecond
 )
 
 func init() {
@@ -176,6 +182,17 @@ func (h *GrokHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, error
 // unrecognized screen holds the last known state and is logged (rate-limited)
 // so a future Grok Build TUI change is visible rather than silently wedging
 // delivery. Blocks until ctx is cancelled.
+//
+// INVARIANT — state changes are emitted TRANSITION-ONLY (each emit is guarded by
+// last != want), never once per poll tick. This is load-bearing for the
+// idle-staleness watchdog backstop: AgentMonitor resets lastActivityAt on every
+// event it processes, and maybeReconcileIdle only force-recovers a stuck Active
+// after lastActivityAt has been stale for DefaultIdleStaleTimeout (~2m). If this
+// loop re-emitted Active every pollInterval the staleness timer would never
+// mature and the watchdog could never rescue a wedged classifier. Debounce is
+// about WHEN a transition is confirmed, not about emitting every tick. If you
+// refactor this loop and TestStart_EmitsOnlyOnTransition fails, do not relax it
+// — restore the transition guards.
 func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEvent) error {
 	h.mu.Lock()
 	forceIdle := h.forceIdleCh
@@ -210,6 +227,9 @@ func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEven
 	start := time.Now()
 	idleStreak := 0
 	var lastUnknownLog time.Time
+	// suppressActiveUntil holds off Active re-classification briefly after a
+	// forced idle so a still-painted turn marker can't immediately undo it.
+	var suppressActiveUntil time.Time
 
 	for {
 		select {
@@ -217,6 +237,7 @@ func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEven
 			return ctx.Err()
 		case <-forceIdle:
 			idleStreak = 0
+			suppressActiveUntil = time.Now().Add(forceIdleSuppression)
 			if last != monitor.StateIdle {
 				if !emit(monitor.StateIdle) {
 					return ctx.Err()
@@ -226,6 +247,11 @@ func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEven
 		case <-ticker.C:
 			switch classifyScreen(h.screen()) {
 			case stateActive:
+				if time.Now().Before(suppressActiveUntil) {
+					// Within the post-interrupt window: ignore a lingering turn
+					// marker so the forced idle sticks.
+					continue
+				}
 				idleStreak = 0
 				if last != monitor.StateActive {
 					if !emit(monitor.StateActive) {

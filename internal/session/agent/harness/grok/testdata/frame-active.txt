@@ -1,11 +1,8 @@
 
-  /tmp/grokprobe/work                                                                                      8.9K / 500K
+   integration/grok-deploy /tmp/h2-grokfix/e2etests                                                       8.9K / 500K
 
 
-     ❯ Count slowly to five, one number per line.                                                            3:56 PM
-
-
-
+     ❯ Reply with exactly one word: PONG                                                                     4:34 PM
 
 
 
@@ -30,7 +27,10 @@
 
 
 
-    ⠧ Waiting for response… 2.9s                                                                    2.9s ⇣8.90k [stop]
+
+
+
+    ⠴ Waiting for response… 3.6s                                                                    3.6s ⇣8.90k [stop]
 
   ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
   │ ❯                                                                                                                │
