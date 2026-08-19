@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **grok: reliably receive and reply to h2 messages**: The Grok Build harness now
+  derives idle/active state from rendered TUI screen content instead of output
+  silence. Grok Build's TUI repaints continuously (animated spinner + elapsed
+  clock), so it never goes output-silent — the previous ptycollector-based
+  detector could therefore never report idle, and normal-priority inter-agent
+  messages (including `--expects-response` replies) were never delivered. State
+  is now classified from the TUI's own indicators (`Waiting for response` /
+  `[stop]` = active; grok prompt chrome, no active marker = idle), with a
+  debounce and an unknown-screen fallback that holds last state and logs. The
+  submit path (`text` + 50ms + `\r`) is unchanged. Marker strings are centralized
+  in `harness/grok/classify.go` and pinned against real captured screen frames.
+
+### Internal
+
+- New `harness.ScreenReader` seam and `VT.ScreenText()` accessor let a harness
+  read the live rendered screen; wired by the session for screen-state harnesses.
+- New on-demand live smoke test (`e2etests`, build tag `grok_live`) drives real
+  grok through the VT + classifier + submit path end to end.
+
 ## v0.3.2
 
 ### New Features

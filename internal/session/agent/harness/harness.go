@@ -98,6 +98,22 @@ func CombineArgs(prependArgs, extraArgs, roleArgs []string) []string {
 	return args
 }
 
+// ScreenReader is an optional interface a Harness may implement when it derives
+// agent state (idle vs active) from the rendered TUI screen rather than from
+// output silence (ptycollector) or structured hooks/OTEL. The session wires the
+// live screen source in after the VT exists and before starting the agent
+// pipeline. Harnesses that don't implement it are unaffected.
+//
+// The grok harness implements this: Grok Build's TUI repaints continuously, so
+// it never goes output-silent and silence-based idle detection can never fire.
+// It instead classifies the screen content (see harness/grok).
+type ScreenReader interface {
+	// SetScreenSource provides a function returning the current rendered screen
+	// text. It may be called before Start; the harness must tolerate the source
+	// returning an empty string (e.g. before the child has painted anything).
+	SetScreenSource(fn func() string)
+}
+
 // LaunchConfig holds configuration to inject into the agent child process.
 type LaunchConfig struct {
 	Env         map[string]string // extra env vars for child process

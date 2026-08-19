@@ -1,0 +1,40 @@
+
+  /tmp/grokprobe/work                                                                                      8.9K / 500K
+
+
+     ❯ Count slowly to five, one number per line.                                                            3:56 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ⠧ Waiting for response… 2.9s                                                                    2.9s ⇣8.90k [stop]
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰────────────────────────────────────────────────────────────────────────────── Grok 4.6 (xhigh) · always-approve ─╯
+
+  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+x:shortcuts
+
