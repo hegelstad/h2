@@ -75,8 +75,11 @@ func (c *Collector) run() {
 	defer idleTimer.Stop()
 
 	// current tracks the last emitted state so we only send on transitions.
-	// The collector starts idle; the first output emits the idle->active edge.
-	current := monitor.StateIdle
+	// Seed with StateInitialized (the monitor's own starting state), not Idle:
+	// a child that produces no output must still emit its first idle->... edge
+	// so the monitor leaves Initialized. Seeding Idle would dedup that first
+	// idle away and strand the monitor in Initialized forever.
+	current := monitor.StateInitialized
 	setState := func(s monitor.State) {
 		if s == current {
 			return
