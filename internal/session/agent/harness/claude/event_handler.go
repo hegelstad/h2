@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,10 @@ import (
 	"h2/internal/session/agent/monitor"
 	"h2/internal/session/agent/shared/debugenv"
 )
+
+// terminalEmitTimeout is how long emitTerminal blocks when the events
+// channel is full before giving up (last-resort non-blocking attempt).
+const terminalEmitTimeout = 2 * time.Second
 
 // EventHandler coalesces Claude telemetry sources (OTEL logs, hooks,
 // and session JSONL lines) into normalized AgentEvents.
@@ -194,7 +199,18 @@ func (h *EventHandler) ProcessHookEvent(eventName string, payload json.RawMessag
 	} else {
 		h.activityLog.HookEvent(sessionID, eventName, toolName)
 	}
-	if h.shouldIgnoreHookSession(sessionID) {
+
+	// Terminal / session lifecycle hooks: resync expectedSessionID instead of
+	// permanently stranding state when Claude's session_id diverges (h2-wkg).
+	if isTerminalOrSessionHook(eventName) {
+		if sessionID != "" {
+			h.resyncExpectedSessionID(sessionID, eventName)
+		}
+	} else if h.shouldIgnoreHookSession(sessionID) {
+		log.Printf(
+			"h2: ignoring hook %q due to session_id mismatch: got %q, expected %q",
+			eventName, sessionID, h.expectedSessionID,
+		)
 		return isKnownHookEvent(eventName)
 	}
 
@@ -265,18 +281,42 @@ func (h *EventHandler) ProcessHookEvent(eventName string, payload json.RawMessag
 		h.emitStateChange(now, monitor.StateActive, monitor.SubStateCompacting)
 
 	case "SessionStart":
-		h.emitStateChange(now, monitor.StateIdle, monitor.SubStateNone)
+		// Non-lossy: idle after session start must not be dropped.
+		h.emitStateChangeTerminal(now, monitor.StateIdle, monitor.SubStateNone)
 
 	case "Stop", "Interrupt":
-		h.emitStateChange(now, monitor.StateIdle, monitor.SubStateNone)
+		// Non-lossy: missing Idle leaves IsIdle false and withholds messages (h2-wkg).
+		h.emitStateChangeTerminal(now, monitor.StateIdle, monitor.SubStateNone)
 
 	case "SessionEnd":
-		h.emit(monitor.AgentEvent{Type: monitor.EventSessionEnded, Timestamp: now})
+		h.emitTerminal(monitor.AgentEvent{Type: monitor.EventSessionEnded, Timestamp: now})
 
 	default:
 		return false
 	}
 	return true
+}
+
+func isTerminalOrSessionHook(eventName string) bool {
+	switch eventName {
+	case "SessionStart", "Stop", "Interrupt", "SessionEnd":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *EventHandler) resyncExpectedSessionID(sessionID, reason string) {
+	if sessionID == "" || sessionID == h.expectedSessionID {
+		return
+	}
+	if h.expectedSessionID != "" {
+		log.Printf(
+			"h2: resyncing expectedSessionID from %q to %q (reason=%s)",
+			h.expectedSessionID, sessionID, reason,
+		)
+	}
+	h.expectedSessionID = sessionID
 }
 
 func (h *EventHandler) shouldIgnoreHookSession(sessionID string) bool {
@@ -307,7 +347,7 @@ func isKnownHookEvent(eventName string) bool {
 
 // HandleInterrupt emits the normalized local interrupt transition.
 func (h *EventHandler) HandleInterrupt() bool {
-	h.emitStateChange(time.Now(), monitor.StateIdle, monitor.SubStateNone)
+	h.emitStateChangeTerminal(time.Now(), monitor.StateIdle, monitor.SubStateNone)
 	return true
 }
 
@@ -328,10 +368,42 @@ func (h *EventHandler) emitStateChange(ts time.Time, state monitor.State, subSta
 	})
 }
 
+func (h *EventHandler) emitStateChangeTerminal(ts time.Time, state monitor.State, subState monitor.SubState) {
+	h.emitTerminal(monitor.AgentEvent{
+		Type:      monitor.EventStateChange,
+		Timestamp: ts,
+		Data:      monitor.StateChangeData{State: state, SubState: subState},
+	})
+}
+
+// emit is lossy under backpressure (non-blocking). Prefer emitTerminal for
+// Stop/SessionEnd/SessionStart so idle is never permanently missed.
 func (h *EventHandler) emit(ev monitor.AgentEvent) {
 	select {
 	case h.events <- ev:
 	default:
+	}
+}
+
+// emitTerminal tries non-blocking first, then blocks up to terminalEmitTimeout
+// so critical Idle/Exited transitions are not dropped when the channel is full.
+func (h *EventHandler) emitTerminal(ev monitor.AgentEvent) {
+	select {
+	case h.events <- ev:
+		return
+	default:
+	}
+	timer := time.NewTimer(terminalEmitTimeout)
+	defer timer.Stop()
+	select {
+	case h.events <- ev:
+	case <-timer.C:
+		// Last-resort non-blocking attempt; log if still dropped.
+		select {
+		case h.events <- ev:
+		default:
+			log.Printf("h2: dropped terminal agent event type=%v after %s (channel full)", ev.Type, terminalEmitTimeout)
+		}
 	}
 }
 

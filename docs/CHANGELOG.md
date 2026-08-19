@@ -29,6 +29,13 @@
 - New on-demand live smoke test (`e2etests`, build tag `grok_live`) drives real
   grok through the VT + classifier + submit path end to end, plus a frame-capture
   tool (build tag `grok_capture`) to regenerate the classifier fixtures.
+- **PTY idle detector no longer floods the event stream**: `ptycollector` now
+  emits state updates only on genuine idle<->active transitions. Previously it
+  emitted an `active` update on every output signal, so a chatty child (e.g. a
+  streaming CLI harness like Grok Build) produced thousands of duplicate
+  `state_change` events, ballooning the per-agent event log until the harness
+  was OOM-killed and restarted into the same loop. `SignalInterrupt` is now
+  routed through the run loop so state tracking stays consistent.
 
 ## v0.3.2
 

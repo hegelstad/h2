@@ -653,3 +653,84 @@ func TestDeliver_NormalNoWaitForIdle(t *testing.T) {
 		t.Fatalf("WaitForIdle should not be called for normal priority, got %d calls", waitCalls)
 	}
 }
+
+func TestDelivery_IdleMessagesWaitUntilIdle_WatchdogPath(t *testing.T) {
+	// Models h2-wkg: idle-priority messages are held while IsIdle is false;
+	// once a watchdog (or Stop) flips idle true, delivery proceeds.
+	var buf threadSafeBuffer
+	q := NewMessageQueue()
+	stop := make(chan struct{})
+
+	idle := false
+	var idleMu sync.Mutex
+	setIdle := func(v bool) {
+		idleMu.Lock()
+		idle = v
+		idleMu.Unlock()
+	}
+	isIdle := func() bool {
+		idleMu.Lock()
+		defer idleMu.Unlock()
+		return idle
+	}
+
+	msg := &Message{
+		ID:        "idle-stuck-1",
+		From:      "reviewer",
+		Priority:  PriorityIdle,
+		Body:      "please wake up",
+		Header:    "h2 message from: reviewer",
+		Status:    StatusQueued,
+		CreatedAt: time.Now(),
+	}
+	// Use a short body file-less path via empty FilePath — deliver uses Body.
+	q.Enqueue(msg)
+
+	delivered := make(chan struct{}, 1)
+	go RunDelivery(DeliveryConfig{
+		Queue:     q,
+		PtyWriter: &buf,
+		IsIdle:    isIdle,
+		OnDeliver: func() {
+			select {
+			case delivered <- struct{}{}:
+			default:
+			}
+		},
+		Stop: stop,
+	})
+
+	// While stuck active/not-idle, idle message must not deliver.
+	select {
+	case <-delivered:
+		t.Fatal("idle message delivered while IsIdle=false")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Simulate monitor watchdog reconciling to Idle.
+	setIdle(true)
+	// Kick delivery loop (notify or wait for 1s ticker — notify via enqueue signal).
+	q.Enqueue(&Message{
+		ID:        "kick",
+		From:      "system",
+		Priority:  PriorityInterrupt,
+		Body:      "kick",
+		Raw:       true,
+		Status:    StatusQueued,
+		CreatedAt: time.Now(),
+	})
+
+	// First delivery may be the kick interrupt; wait until our idle body appears.
+	deadline := time.After(5 * time.Second)
+	for {
+		if strings.Contains(buf.String(), "please wake up") {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("idle message not delivered after idle became true; buf=%q", buf.String())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	close(stop)
+}
