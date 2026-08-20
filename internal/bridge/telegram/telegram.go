@@ -75,7 +75,7 @@ func (t *Telegram) apiURL(method string) string {
 // Telegram's 4096-character limit are split into multiple messages at line
 // boundaries when possible, up to maxPages messages.
 func (t *Telegram) Send(ctx context.Context, text string) error {
-	return t.sendWithFormat(ctx, text, "")
+	return t.sendWithFormat(ctx, text, "HTML")
 }
 
 // SendFormatted posts a formatted message (HTML or MarkdownV2) to the
@@ -147,7 +147,31 @@ func (t *Telegram) sendWithFormat(ctx context.Context, text, format string) erro
 	return nil
 }
 
+func isParseEntitiesError(r apiResponse) bool {
+	return r.ErrorCode == 400 && strings.Contains(r.Description, "can't parse entities")
+}
+
 func (t *Telegram) sendChunk(ctx context.Context, text, format string) error {
+	result, err := t.postSendMessage(text, format)
+	if err != nil {
+		return err
+	}
+	if result.OK {
+		return nil
+	}
+	if isParseEntitiesError(result) {
+		result, err = t.postSendMessage(text, "")
+		if err != nil {
+			return err
+		}
+		if result.OK {
+			return nil
+		}
+	}
+	return fmt.Errorf("telegram send: API error: %s", result.Description)
+}
+
+func (t *Telegram) postSendMessage(text, format string) (apiResponse, error) {
 	params := url.Values{
 		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
 		"text":    {text},
@@ -157,18 +181,15 @@ func (t *Telegram) sendChunk(ctx context.Context, text, format string) error {
 	}
 	resp, err := t.client.PostForm(t.apiURL("sendMessage"), params)
 	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
+		return apiResponse{}, fmt.Errorf("telegram send: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result apiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("telegram send: decode response: %w", err)
+		return apiResponse{}, fmt.Errorf("telegram send: decode response: %w", err)
 	}
-	if !result.OK {
-		return fmt.Errorf("telegram send: API error: %s", result.Description)
-	}
-	return nil
+	return result, nil
 }
 
 // Start begins long-polling for incoming messages. It spawns a goroutine
@@ -419,6 +440,7 @@ func (t *Telegram) SendTyping(ctx context.Context) error {
 
 type apiResponse struct {
 	OK          bool   `json:"ok"`
+	ErrorCode   int    `json:"error_code,omitempty"`
 	Description string `json:"description,omitempty"`
 }
 

@@ -187,7 +187,7 @@ func TestSendFormatted_MarkdownV2(t *testing.T) {
 	}
 }
 
-func TestSend_NoParseMode(t *testing.T) {
+func TestSend_DefaultsToHTML(t *testing.T) {
 	var gotParseMode string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,8 +207,81 @@ func TestSend_NoParseMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if gotParseMode != "" {
-		t.Errorf("parse_mode = %q, want empty (plain Send should not set parse_mode)", gotParseMode)
+	if gotParseMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML (plain Send defaults to HTML)", gotParseMode)
+	}
+}
+
+func TestSend_FallsBackToPlainOnParseError(t *testing.T) {
+	var mu sync.Mutex
+	var calls []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.ParseForm()
+		mu.Lock()
+		calls = append(calls, r.FormValue("parse_mode"))
+		n := len(calls)
+		mu.Unlock()
+		if n == 1 {
+			json.NewEncoder(w).Encode(apiResponse{
+				OK:          false,
+				ErrorCode:   400,
+				Description: "Bad Request: can't parse entities: unexpected end tag",
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(apiResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+	}
+
+	err := tg.Send(context.Background(), "<b>oops")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(calls))
+	}
+	if calls[1] != "" {
+		t.Errorf("second parse_mode = %q, want empty (plain fallback)", calls[1])
+	}
+}
+
+func TestSend_DoesNotFallBackOnOtherError(t *testing.T) {
+	var calls atomic.Int32
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		json.NewEncoder(w).Encode(apiResponse{
+			OK:          false,
+			ErrorCode:   400,
+			Description: "Bad Request: chat not found",
+		})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+	}
+
+	err := tg.Send(context.Background(), "hello")
+	if err == nil {
+		t.Fatal("expected error from API")
+	}
+	if !strings.Contains(err.Error(), "chat not found") {
+		t.Errorf("error = %q, want chat not found", err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("calls = %d, want 1 (no fallback)", n)
 	}
 }
 
