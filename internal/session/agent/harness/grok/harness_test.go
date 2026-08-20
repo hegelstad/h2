@@ -155,9 +155,136 @@ func TestStartAndOutputIdleDetection(t *testing.T) {
 	}
 }
 
-func TestHandleHookEvent_Unsupported(t *testing.T) {
-	if New(testRC(nil)).HandleHookEvent("PreToolUse", json.RawMessage(`{}`)) {
-		t.Error("HandleHookEvent should return false — grok harness has no hook integration")
+// drainEvents reads all currently-buffered events from the harness internalCh.
+func drainEvents(h *GrokHarness) []monitor.AgentEvent {
+	var evs []monitor.AgentEvent
+	for {
+		select {
+		case ev := <-h.internalCh:
+			evs = append(evs, ev)
+		default:
+			return evs
+		}
+	}
+}
+
+func TestHandleHookEvent_StopSettlesIdle(t *testing.T) {
+	for _, event := range []string{"stop", "stop_failure", "stop_cancelled"} {
+		t.Run(event, func(t *testing.T) {
+			h := New(testRC(nil))
+			if !h.HandleHookEvent(event, json.RawMessage(`{"reason":"end_turn"}`)) {
+				t.Fatalf("HandleHookEvent(%q) = false, want true", event)
+			}
+			evs := drainEvents(h)
+			if len(evs) != 1 {
+				t.Fatalf("got %d events, want 1: %+v", len(evs), evs)
+			}
+			if evs[0].Type != monitor.EventStateChange {
+				t.Fatalf("event type = %v, want EventStateChange", evs[0].Type)
+			}
+			data := evs[0].Data.(monitor.StateChangeData)
+			if data.State != monitor.StateIdle || data.SubState != monitor.SubStateNone {
+				t.Errorf("state = %v/%v, want Idle/None", data.State, data.SubState)
+			}
+		})
+	}
+}
+
+func TestHandleHookEvent_UserPromptSubmitGoesActive(t *testing.T) {
+	h := New(testRC(nil))
+	if !h.HandleHookEvent("user_prompt_submit", json.RawMessage(`{}`)) {
+		t.Fatal("HandleHookEvent(user_prompt_submit) = false, want true")
+	}
+	evs := drainEvents(h)
+	if len(evs) != 2 {
+		t.Fatalf("got %d events, want 2 (UserPrompt + StateChange): %+v", len(evs), evs)
+	}
+	if evs[0].Type != monitor.EventUserPrompt {
+		t.Errorf("first event = %v, want EventUserPrompt", evs[0].Type)
+	}
+	data := evs[1].Data.(monitor.StateChangeData)
+	if data.State != monitor.StateActive || data.SubState != monitor.SubStateThinking {
+		t.Errorf("state = %v/%v, want Active/Thinking", data.State, data.SubState)
+	}
+}
+
+func TestHandleHookEvent_NotificationIdlePrompt(t *testing.T) {
+	h := New(testRC(nil))
+	if !h.HandleHookEvent("notification", json.RawMessage(`{"notificationType":"idle_prompt"}`)) {
+		t.Fatal("HandleHookEvent(notification idle_prompt) = false, want true")
+	}
+	evs := drainEvents(h)
+	if len(evs) != 1 || evs[0].Data.(monitor.StateChangeData).State != monitor.StateIdle {
+		t.Fatalf("want single Idle event, got %+v", evs)
+	}
+}
+
+func TestHandleHookEvent_NotificationNonIdleIgnored(t *testing.T) {
+	h := New(testRC(nil))
+	if !h.HandleHookEvent("notification", json.RawMessage(`{"notificationType":"permission_prompt"}`)) {
+		t.Fatal("HandleHookEvent should acknowledge a known notification event")
+	}
+	if evs := drainEvents(h); len(evs) != 0 {
+		t.Errorf("non-idle notification should emit no state change, got %+v", evs)
+	}
+}
+
+func TestHandleHookEvent_SubagentEventIgnored(t *testing.T) {
+	h := New(testRC(nil))
+	// A subagent stop must not settle the whole session to idle.
+	if !h.HandleHookEvent("stop", json.RawMessage(`{"subagentType":"explore","reason":"end_turn"}`)) {
+		t.Fatal("HandleHookEvent should acknowledge a subagent event")
+	}
+	if evs := drainEvents(h); len(evs) != 0 {
+		t.Errorf("subagent stop should emit no state change, got %+v", evs)
+	}
+}
+
+func TestHandleHookEvent_SessionEnd(t *testing.T) {
+	h := New(testRC(nil))
+	if !h.HandleHookEvent("session_end", json.RawMessage(`{}`)) {
+		t.Fatal("HandleHookEvent(session_end) = false, want true")
+	}
+	evs := drainEvents(h)
+	if len(evs) != 1 || evs[0].Type != monitor.EventSessionEnded {
+		t.Fatalf("want single EventSessionEnded, got %+v", evs)
+	}
+}
+
+func TestHandleHookEvent_UnknownReturnsFalse(t *testing.T) {
+	h := New(testRC(nil))
+	if h.HandleHookEvent("pre_tool_use", json.RawMessage(`{}`)) {
+		t.Error("HandleHookEvent(pre_tool_use) should return false — not a state-affecting event")
+	}
+	if evs := drainEvents(h); len(evs) != 0 {
+		t.Errorf("unknown event should emit nothing, got %+v", evs)
+	}
+}
+
+func TestStartForwardsHookEvents(t *testing.T) {
+	h := New(testRC(nil))
+	if _, err := h.PrepareForLaunch(false); err != nil {
+		t.Fatalf("PrepareForLaunch: %v", err)
+	}
+	defer h.Stop()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	events := make(chan monitor.AgentEvent, 16)
+	go func() { _ = h.Start(ctx, events) }()
+
+	h.HandleHookEvent("stop", json.RawMessage(`{"reason":"end_turn"}`))
+
+	select {
+	case ev := <-events:
+		if ev.Type != monitor.EventStateChange {
+			t.Fatalf("event type = %v, want EventStateChange", ev.Type)
+		}
+		if ev.Data.(monitor.StateChangeData).State != monitor.StateIdle {
+			t.Errorf("state = %v, want Idle", ev.Data.(monitor.StateChangeData).State)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not forward the hook-driven idle event")
 	}
 }
 

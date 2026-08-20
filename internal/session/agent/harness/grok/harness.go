@@ -3,15 +3,21 @@
 // Grok Build's flag surface is deliberately Claude-Code-compatible
 // (--permission-mode shares the same mode names; --system-prompt-override and
 // --rules mirror --system-prompt and --append-system-prompt), so config
-// mapping follows the claude harness closely. Telemetry uses output-based
-// idle detection via ptycollector (like the generic harness) — Grok Build
-// has no OTEL/hook integration wired up yet.
+// mapping follows the claude harness closely.
+//
+// Turn-completion is detected via Grok Build's lifecycle hooks (the same
+// mechanism Claude Code exposes): h2 writes hook registrations into
+// $GROK_HOME/hooks, the child CLI runs "h2 handle-hook" on Stop/StopFailure/
+// StopCancelled/Notification(idle_prompt), and HandleHookEvent emits a
+// non-lossy Idle transition — exactly the position the Claude agents run in.
+// The ptycollector output-timer is retained as a fallback safety net so a
+// missed hook still eventually settles to idle.
 package grok
 
 import (
 	"context"
 	"encoding/json"
-	"os"
+	"log"
 	"time"
 
 	"h2/internal/activitylog"
@@ -20,6 +26,11 @@ import (
 	"h2/internal/session/agent/monitor"
 	"h2/internal/session/agent/shared/ptycollector"
 )
+
+// terminalEmitTimeout is how long emitTerminal blocks when the events channel
+// is full before giving up (last-resort non-blocking attempt). Mirrors the
+// claude harness so critical Idle transitions are never dropped.
+const terminalEmitTimeout = 2 * time.Second
 
 func init() {
 	harness.Register(harness.HarnessSpec{
@@ -35,11 +46,19 @@ func init() {
 type GrokHarness struct {
 	rc        *config.RuntimeConfig
 	collector *ptycollector.Collector // created in PrepareForLaunch()
+
+	// internalCh buffers events from hook handlers. Start() forwards these to
+	// the external events channel, alongside the ptycollector's output-timer
+	// state updates.
+	internalCh chan monitor.AgentEvent
 }
 
 // New creates a GrokHarness.
 func New(rc *config.RuntimeConfig) *GrokHarness {
-	return &GrokHarness{rc: rc}
+	return &GrokHarness{
+		rc:         rc,
+		internalCh: make(chan monitor.AgentEvent, 256),
+	}
 }
 
 // --- Identity ---
@@ -96,15 +115,15 @@ func (h *GrokHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	return nil
 }
 
-// EnsureConfigDir creates the Grok config directory. Unlike Claude, no
-// default settings file is written — Grok Build initialises its own config
-// on first run, and credentials are populated via 'h2 auth grok'.
+// EnsureConfigDir creates the Grok config directory and writes h2's hook
+// registrations to $GROK_HOME/hooks. Credentials are populated separately via
+// 'h2 auth grok'; Grok Build initialises the rest of its config on first run.
 func (h *GrokHarness) EnsureConfigDir(h2Dir string) error {
 	configDir := h.rc.HarnessConfigDir()
 	if configDir == "" {
 		return nil
 	}
-	return os.MkdirAll(configDir, 0o755)
+	return config.EnsureGrokConfigDir(configDir)
 }
 
 // --- Launch ---
@@ -119,11 +138,17 @@ func (h *GrokHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, error
 
 // --- Runtime ---
 
-// Start bridges the output collector's state updates to the events channel.
-// Blocks until ctx is cancelled.
+// Start bridges both the hook-driven internal events and the output collector's
+// state updates to the external events channel. Blocks until ctx is cancelled.
 func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEvent) error {
 	for {
 		select {
+		case ev := <-h.internalCh:
+			select {
+			case events <- ev:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		case su := <-h.collector.StateCh():
 			select {
 			case events <- monitor.AgentEvent{
@@ -140,9 +165,102 @@ func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEven
 	}
 }
 
-// HandleHookEvent returns false — the grok harness has no hook integration.
+// HandleHookEvent translates Grok Build lifecycle-hook events into AgentEvents.
+// Grok's event values are snake_case ("stop", "user_prompt_submit", …), unlike
+// Claude's PascalCase. Idle transitions use emitTerminal so a full channel can
+// never permanently strand the agent in the active state.
 func (h *GrokHarness) HandleHookEvent(eventName string, payload json.RawMessage) bool {
-	return false
+	// A subagent's turn end is not the session's idle: Grok tags those events
+	// with subagentType. Acknowledge (known event) but do not change state.
+	meta := parseGrokHookMeta(payload)
+	if meta.SubagentType != "" {
+		return true
+	}
+
+	now := time.Now()
+	switch eventName {
+	case "user_prompt_submit":
+		h.emit(monitor.AgentEvent{Type: monitor.EventUserPrompt, Timestamp: now})
+		h.emitStateChange(now, monitor.StateActive, monitor.SubStateThinking)
+
+	case "stop", "stop_failure", "stop_cancelled":
+		// Non-lossy: a dropped Idle would leave IsIdle false and withhold
+		// messages forever (the TUI-drift wedge this change replaces).
+		h.emitStateChangeTerminal(now, monitor.StateIdle, monitor.SubStateNone)
+
+	case "notification":
+		// Registered with matcher idle_prompt, so this is the idle backstop.
+		// Guard on notificationType too in case a broader Notification fires.
+		if meta.NotificationType != "" && meta.NotificationType != "idle_prompt" {
+			return true
+		}
+		h.emitStateChangeTerminal(now, monitor.StateIdle, monitor.SubStateNone)
+
+	case "session_end":
+		h.emitTerminal(monitor.AgentEvent{Type: monitor.EventSessionEnded, Timestamp: now})
+
+	default:
+		return false
+	}
+	return true
+}
+
+// grokHookMeta holds the Grok hook envelope fields h2 keys on.
+type grokHookMeta struct {
+	SubagentType     string `json:"subagentType"`
+	NotificationType string `json:"notificationType"`
+}
+
+func parseGrokHookMeta(payload json.RawMessage) grokHookMeta {
+	var m grokHookMeta
+	if len(payload) > 0 {
+		_ = json.Unmarshal(payload, &m)
+	}
+	return m
+}
+
+func (h *GrokHarness) emit(ev monitor.AgentEvent) {
+	select {
+	case h.internalCh <- ev:
+	default:
+	}
+}
+
+func (h *GrokHarness) emitStateChange(ts time.Time, state monitor.State, subState monitor.SubState) {
+	h.emit(monitor.AgentEvent{
+		Type:      monitor.EventStateChange,
+		Timestamp: ts,
+		Data:      monitor.StateChangeData{State: state, SubState: subState},
+	})
+}
+
+func (h *GrokHarness) emitStateChangeTerminal(ts time.Time, state monitor.State, subState monitor.SubState) {
+	h.emitTerminal(monitor.AgentEvent{
+		Type:      monitor.EventStateChange,
+		Timestamp: ts,
+		Data:      monitor.StateChangeData{State: state, SubState: subState},
+	})
+}
+
+// emitTerminal tries non-blocking first, then blocks up to terminalEmitTimeout
+// so critical Idle/Exited transitions are not dropped when the channel is full.
+func (h *GrokHarness) emitTerminal(ev monitor.AgentEvent) {
+	select {
+	case h.internalCh <- ev:
+		return
+	default:
+	}
+	timer := time.NewTimer(terminalEmitTimeout)
+	defer timer.Stop()
+	select {
+	case h.internalCh <- ev:
+	case <-timer.C:
+		select {
+		case h.internalCh <- ev:
+		default:
+			log.Printf("h2: dropped terminal grok agent event type=%v after %s (channel full)", ev.Type, terminalEmitTimeout)
+		}
+	}
 }
 
 // HandleInterrupt forces an immediate idle state update for local Ctrl+C.

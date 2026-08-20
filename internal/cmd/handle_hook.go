@@ -48,15 +48,9 @@ in settings.json. Exits 0 with JSON on stdout.`,
 				return fmt.Errorf("read stdin: %w", err)
 			}
 
-			// Extract hook_event_name from the JSON payload.
-			var envelope struct {
-				HookEventName string `json:"hook_event_name"`
-			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
-				return fmt.Errorf("parse hook JSON: %w", err)
-			}
-			if envelope.HookEventName == "" {
-				return fmt.Errorf("hook_event_name not found in payload")
+			eventName, err := extractHookEventName(data)
+			if err != nil {
+				return err
 			}
 			if forcedPermissionResult != "" && !isValidForcedPermissionResult(forcedPermissionResult) {
 				return fmt.Errorf("--force-permission-request-result must be one of: deny, allow, ask_user")
@@ -72,7 +66,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 1: Always forward the hook event to the agent.
-			sendHookEvent(agentName, envelope.HookEventName, data)
+			sendHookEvent(agentName, eventName, data)
 
 			// Load permission review config and role from session metadata.
 			sessionDir := config.FindSessionDirByAgentName(agentName)
@@ -86,7 +80,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 2: For PreToolUse, optionally run DCG.
-			if envelope.HookEventName == "PreToolUse" {
+			if eventName == "PreToolUse" {
 				if prConfig != nil && prConfig.DCG != nil && prConfig.DCG.IsEnabled() {
 					return handleDCGPreToolUse(cmd, agentName, roleName, prConfig.DCG, data)
 				}
@@ -95,7 +89,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 3: For PermissionRequest, optionally run the permission reviewer.
-			if envelope.HookEventName == "PermissionRequest" {
+			if eventName == "PermissionRequest" {
 				if delayPermissionRequestSeconds > 0 {
 					time.Sleep(time.Duration(delayPermissionRequestSeconds * float64(time.Second)))
 				}
@@ -118,6 +112,29 @@ in settings.json. Exits 0 with JSON on stdout.`,
 	cmd.Flags().Float64Var(&delayPermissionRequestSeconds, "delay-permission-request-seconds", 0, "Testing helper: for PermissionRequest only, delay before decision handling (after forwarding the hook event)")
 
 	return cmd
+}
+
+// extractHookEventName pulls the hook event name out of a hook payload,
+// supporting both Claude Code's snake_case "hook_event_name" and Grok Build's
+// camelCase "hookEventName". The snake_case key wins when both are present.
+// The returned value is the harness's own event vocabulary (Claude PascalCase
+// like "Stop"; Grok snake_case like "stop") — downstream dispatch is per-harness.
+func extractHookEventName(data []byte) (string, error) {
+	var envelope struct {
+		Snake string `json:"hook_event_name"`
+		Camel string `json:"hookEventName"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", fmt.Errorf("parse hook JSON: %w", err)
+	}
+	name := envelope.Snake
+	if name == "" {
+		name = envelope.Camel
+	}
+	if name == "" {
+		return "", fmt.Errorf("hook_event_name not found in payload")
+	}
+	return name, nil
 }
 
 // sendHookEvent forwards a hook event to the agent's socket. Best-effort:

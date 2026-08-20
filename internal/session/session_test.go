@@ -16,6 +16,7 @@ import (
 	"h2/internal/session/client"
 	"h2/internal/session/message"
 	"h2/internal/session/virtualterminal"
+	"h2/internal/socketdir"
 )
 
 func setFastIdle(t *testing.T) {
@@ -871,10 +872,16 @@ func TestSetupAgent_LogDirUsesH2Dir(t *testing.T) {
 		t.Fatalf("write marker: %v", err)
 	}
 
-	// Point H2_DIR at the custom dir and reset the resolve cache.
+	// Point H2_DIR at the custom dir and reset the resolve + socketdir caches.
+	// socketdir.Dir() memoizes via sync.Once, so a stale cached path would leak
+	// into later tests (e.g. TestNotifyBridges) and collide on MkdirAll.
 	t.Setenv("H2_DIR", customH2Dir)
 	config.ResetResolveCache()
-	t.Cleanup(config.ResetResolveCache)
+	socketdir.ResetDirCache()
+	t.Cleanup(func() {
+		config.ResetResolveCache()
+		socketdir.ResetDirCache()
+	})
 
 	s := NewFromConfig(testRC("test-agent", "true", nil))
 	defer s.Stop()
