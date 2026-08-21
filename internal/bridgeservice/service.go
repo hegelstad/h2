@@ -88,10 +88,14 @@ func New(bridges []bridge.Bridge, name, concierge, pod, socketDir string, allowe
 		queryAgentStateFn: nil,
 		streams:           make(map[string]*liveStream),
 	}
+	// Default mirror target is nil (dynamic concierge). An explicit
+	// ServiceOpts.MirrorTarget of "" disables mirroring.
+	var mirrorTarget *string
 	if len(opts) > 0 {
 		s.expectsResponse = opts[0].ExpectsResponse
-		s.configureMirror(bridges, opts[0].MirrorTarget)
+		mirrorTarget = opts[0].MirrorTarget
 	}
+	s.configureMirror(bridges, mirrorTarget)
 	s.queryAgentStateFn = s.queryAgentState
 	return s
 }

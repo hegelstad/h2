@@ -2,8 +2,11 @@ package bridgeservice
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,6 +306,20 @@ func TestConfigureMirror_InstallsSinkOnTelegram(t *testing.T) {
 	}
 }
 
+func TestConfigureMirror_DefaultWithoutOpts(t *testing.T) {
+	tg := &telegram.Telegram{Token: "TOKEN", ChatID: 1}
+	svc := New([]bridge.Bridge{tg}, "alice", "concierge", "", t.TempDir(), nil)
+	if !svc.mirrorEnabled {
+		t.Error("mirrorEnabled = false, want true (default is dynamic concierge)")
+	}
+	if !svc.mirrorDynamic {
+		t.Error("mirrorDynamic = false, want true")
+	}
+	if tg.Mirror == nil {
+		t.Fatal("expected mirror sink installed when New is called without opts")
+	}
+}
+
 func TestMirrorOutbound_DeliversToDynamicConcierge(t *testing.T) {
 	tmpDir := shortTempDir(t)
 	concierge := newMockAgent(t, tmpDir, "concierge")
@@ -335,6 +352,77 @@ func TestMirrorOutbound_DisabledNoDelivery(t *testing.T) {
 	}
 	if reqs := concierge.Received(); len(reqs) != 0 {
 		t.Errorf("expected no delivery when disabled, got %d", len(reqs))
+	}
+}
+
+func TestMirrorOutbound_DeliversToFixedTarget(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	watcher := newMockAgent(t, tmpDir, "watcher")
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil,
+		ServiceOpts{MirrorTarget: strptr("watcher")})
+
+	if err := svc.mirrorOutbound("[telegram-out] hi"); err != nil {
+		t.Fatalf("mirrorOutbound: %v", err)
+	}
+
+	if reqs := watcher.Received(); len(reqs) != 1 {
+		t.Fatalf("expected 1 mirrored request on watcher, got %d", len(reqs))
+	} else if reqs[0].Body != "[telegram-out] hi" {
+		t.Errorf("watcher body = %q", reqs[0].Body)
+	}
+	if reqs := concierge.Received(); len(reqs) != 0 {
+		t.Errorf("expected no delivery to concierge when target is fixed, got %d", len(reqs))
+	}
+}
+
+func okSendMessageServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": map[string]any{"message_id": 1}})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestSend_MirrorsThroughServiceToConcierge(t *testing.T) {
+	srv := okSendMessageServer(t)
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	tg := &telegram.Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	New([]bridge.Bridge{tg}, "alice", "concierge", "", tmpDir, nil, ServiceOpts{})
+
+	if err := tg.Send(context.Background(), "hello from h2"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := tg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 mirrored request, got %d", len(reqs))
+	}
+	if reqs[0].From != "alice" {
+		t.Errorf("from = %q, want alice", reqs[0].From)
+	}
+	if reqs[0].Body != "[telegram-out] hello from h2" {
+		t.Errorf("body = %q", reqs[0].Body)
+	}
+}
+
+func TestSend_ServiceMirrorDownDoesNotFailSend(t *testing.T) {
+	srv := okSendMessageServer(t)
+	tmpDir := shortTempDir(t)
+	// No agent socket in tmpDir: the mirror sink will fail to connect.
+	tg := &telegram.Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	New([]bridge.Bridge{tg}, "alice", "concierge", "", tmpDir, nil, ServiceOpts{})
+
+	if err := tg.Send(context.Background(), "critical alert"); err != nil {
+		t.Fatalf("Send returned error from down mirror sink: %v", err)
+	}
+	if err := tg.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 

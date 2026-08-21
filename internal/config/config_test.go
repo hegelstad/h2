@@ -82,6 +82,7 @@ users:
 }
 
 func TestLoadFrom_MirrorTarget(t *testing.T) {
+	setupFakeHome(t)
 	dir := t.TempDir()
 
 	// Omitted -> nil pointer (service treats as dynamic concierge).

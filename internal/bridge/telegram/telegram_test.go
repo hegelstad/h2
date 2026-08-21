@@ -138,6 +138,110 @@ func TestSend_MirrorFailureDoesNotFailSend(t *testing.T) {
 	tg.mirrorWG.Wait()
 }
 
+func TestSend_FailedSendDoesNotMirror(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: false, Description: "bot was blocked"})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "never delivered"); err == nil {
+		t.Fatal("expected send error")
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 0 {
+		t.Errorf("failed send still mirrored %v", mirrored)
+	}
+}
+
+func TestSend_SlowMirrorDoesNotBlockSend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	release := make(chan struct{})
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			<-release
+			return nil
+		},
+	}
+
+	start := time.Now()
+	if err := tg.Send(context.Background(), "urgent"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	elapsed := time.Since(start)
+	close(release)
+	tg.mirrorWG.Wait()
+
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("Send blocked on slow mirror for %s", elapsed)
+	}
+}
+
+func TestStreamClose_MirrorsToSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	s, err := tg.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if _, err := s.Write([]byte("streamed hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 1 {
+		t.Fatalf("mirror called %d times, want 1", len(mirrored))
+	}
+	if want := "[telegram-out] streamed hello"; mirrored[0] != want {
+		t.Errorf("mirror = %q, want %q", mirrored[0], want)
+	}
+}
+
 func TestSend_ChunksLongMessage(t *testing.T) {
 	var mu sync.Mutex
 	var sentTexts []string
