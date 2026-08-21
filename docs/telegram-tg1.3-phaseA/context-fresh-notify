@@ -1,0 +1,36 @@
+#!/bin/bash
+# Notify on Telegram when concierge gets a fresh conversation context after being idle.
+# Runs as a SessionStart hook for the concierge agent.
+
+set -euo pipefail
+
+export H2_DIR=/home/ubuntu/h2home
+MARKER_FILE="$H2_DIR/.concierge-last-active"
+THRESHOLD_SECONDS=3600  # 1 hour
+
+# Only run for concierge
+AGENT_NAME="${H2_AGENT:-}"
+if [ "$AGENT_NAME" != "concierge" ]; then
+    exit 0
+fi
+
+now=$(date +%s)
+
+if [ -f "$MARKER_FILE" ]; then
+    last_active=$(cat "$MARKER_FILE" 2>/dev/null || echo "0")
+    gap=$((now - last_active))
+
+    if [ "$gap" -gt "$THRESHOLD_SECONDS" ]; then
+        hours=$((gap / 3600))
+        mins=$(( (gap % 3600) / 60 ))
+        if [ "$hours" -gt 0 ]; then
+            time_str="${hours}t ${mins}min"
+        else
+            time_str="${mins}min"
+        fi
+        /usr/local/bin/h2 send telegram "<b>Heads up:</b> min samtale-kontekst er ny (sist aktiv for ${time_str} siden). Jeg husker ikke hva vi snakket om sist, men jeg har tilgang til meldingshistorikk og memory." &
+    fi
+fi
+
+# Update marker
+echo "$now" > "$MARKER_FILE"

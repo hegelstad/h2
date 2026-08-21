@@ -1,0 +1,85 @@
+#!/bin/bash
+# slskd-watchdog: restarts slskd when Soulseek loses its login and does not
+# come back by itself, and alerts via `h2 send telegram` (bridge HTML +
+# concierge mirror).
+#
+# Installed 2026-08-18 after slskd sat wedged in "Disconnecting" while BOTH
+# containers reported healthy for 6 days. The container healthcheck cannot see
+# this: slskd is alive, it has simply lost the Soulseek session. Only the API
+# state tells the truth.
+#
+# Deliberately NOT a nightly blind restart. A restart is cheap but not free --
+# it drops in-flight transfers -- so this only acts on an actually broken
+# session, and only after it has stayed broken across two checks, since a
+# dropout normally self-heals within seconds.
+#
+# Runs from cron every 10 minutes.
+
+set -uo pipefail
+
+STACK=/home/ubuntu/soulseek-stack
+LOG=/home/ubuntu/h2home/logs/slskd-watchdog.log
+STRIKES=/home/ubuntu/h2home/state/slskd-watchdog.strikes
+NEEDED=2   # consecutive bad checks before acting (~10-20 min of real downtime)
+
+mkdir -p "$(dirname "$STRIKES")"
+
+H2="${H2:-/usr/local/bin/h2}"
+
+set -a
+# shellcheck disable=SC1091
+[ -f "$STACK/.env" ] && . "$STACK/.env"
+set +a
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
+
+alert() {
+    "$H2" send telegram --file <(printf '%s\n' "$1") >/dev/null
+}
+
+logged_in() {
+    curl -s -m 10 -H "X-API-Key: ${SLSKD_API_KEY}" \
+        http://127.0.0.1:5030/api/v0/server 2>/dev/null \
+        | grep -q '"isLoggedIn":true'
+}
+
+if logged_in; then
+    [ -f "$STRIKES" ] && rm -f "$STRIKES"
+    exit 0
+fi
+
+# Not logged in. Count it; only act once it has persisted.
+n=$(( $(cat "$STRIKES" 2>/dev/null || echo 0) + 1 ))
+echo "$n" > "$STRIKES"
+log "soulseek not logged in (strike $n/$NEEDED)"
+[ "$n" -lt "$NEEDED" ] && exit 0
+
+cd "$STACK" || { log "cannot cd to $STACK"; exit 1; }
+
+# First escalation: a plain restart. Fixes the ordinary wedged-session case.
+log "restarting slskd"
+docker compose restart slskd >> "$LOG" 2>&1
+sleep 25
+
+if logged_in; then
+    log "restart OK"
+    rm -f "$STRIKES"
+    alert "<b>slskd</b> hang seg og ble automatisk restartet av slskd-watchdog. Soulseek er pålogget igjen."
+    exit 0
+fi
+
+# Second escalation: if gluetun was recreated, slskd's network namespace is
+# gone and `restart` cannot bring it back -- only `up -d` can. See the comment
+# in docker-compose.yml.
+log "still down after restart; trying up -d (recreated-gluetun case)"
+docker compose up -d slskd >> "$LOG" 2>&1
+sleep 25
+
+if logged_in; then
+    log "up -d OK"
+    rm -f "$STRIKES"
+    alert "<b>slskd</b> mistet nettverket sitt (gluetun var gjenskapt) og ble hentet tilbake av slskd-watchdog. Soulseek er pålogget igjen."
+else
+    log "FAILED: still not logged in after restart and up -d"
+    alert "<b>slskd</b> er nede og automatisk gjenoppretting feilet. Både restart og up -d er forsøkt. Sjekk <code>~/h2home/logs/slskd-watchdog.log</code>"
+fi

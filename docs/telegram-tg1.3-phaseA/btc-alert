@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""
+btc-alert: Sjekker Bitcoin-prisen via CoinGecko og sender Telegram-varsling
+når prisen faller under TARGET_USD. Skriver siste trigger til en state-fil
+slik at vi ikke spammer samme varsel gjentatte ganger.
+"""
+import json
+import os
+import urllib.request
+from datetime import datetime, timezone
+
+TARGET_USD = 45_000
+STATE_FILE = os.path.expanduser("~/h2home/state/btc-alert-state.json")
+from telegram_env import h2_send_telegram
+
+
+def btc_price():
+    req = urllib.request.Request(
+        "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)["bitcoin"]["usd"]
+
+
+def load_state():
+    try:
+        return json.loads(open(STATE_FILE).read())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state):
+    open(STATE_FILE, "w").write(json.dumps(state, indent=2))
+
+
+def main():
+    try:
+        price = btc_price()
+    except Exception as e:
+        print(f"Klarte ikke hente BTC-pris: {e}")
+        return
+
+    print(f"BTC: ${price:,.0f}")
+
+    if price > TARGET_USD:
+        print(f"Over ${TARGET_USD:,} — ingen varsling.")
+        return
+
+    state = load_state()
+    last_trigger_price = state.get("last_trigger_price")
+
+    # Ikke send på nytt hvis prisen ikke har steget over terskelen siden sist
+    if last_trigger_price is not None and price > last_trigger_price * 0.98:
+        print(f"Allerede varslet ved ${last_trigger_price:,} — hopper over.")
+        return
+
+    now = datetime.now(timezone.utc).isoformat()
+    msg = (
+        f"<b>BTC under ${TARGET_USD:,}!</b>\n\n"
+        f"Nåværende pris: <b>${price:,.0f}</b>\n\n"
+        f"Alex Mason-plan sier: kjøp ved $45K → mål $200K.\n"
+        f"Dette er påminnelsen din."
+    )
+
+    try:
+        h2_send_telegram(msg)
+        state["last_trigger_price"] = price
+        state["last_trigger_ts"] = now
+        save_state(state)
+        print(f"Varsling sendt: BTC ${price:,.0f}")
+    except Exception as e:
+        print(f"Telegram-feil: {e}")
+
+
+if __name__ == "__main__":
+    main()

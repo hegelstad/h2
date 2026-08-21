@@ -1,0 +1,219 @@
+#!/usr/bin/env python3
+"""
+jaktformidling-weekly-pulse
+
+Signal-aware weekly status for jaktformidling. Tracks trajectory across weeks
+and asks Claude: "is this getting better, given where we are in the journey?"
+
+Runs every Monday 07:00 UTC via crontab.
+State file: ~/h2home/state/jaktformidling-pulse-history.json
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+H2_CONFIG = os.path.expanduser("~/h2home/config.yaml")
+STATE_FILE = os.path.expanduser("~/h2home/state/jaktformidling-pulse-history.json")
+CONFIG_FILE = os.path.expanduser("~/h2home/state/jaktformidling-pulse-config.json")
+REPO = os.path.expanduser("~/h2home/projects/workspace/jaktformidling")
+CLAUDE = shutil.which("claude") or "/usr/bin/claude"
+
+_DEFAULT_CONFIG = {
+    "stage_thresholds": {"cold_start_max_inquiries": 0, "early_traction_min_weekly_inquiries": 1},
+    "stage_prompts": {
+        "cold_start": "Markedsplassen er i cold-start. Ingen henvendelser ennå. Mulige årsaker: jegere finner ikke annonsene, stoler ikke på plattformen, eller kontaktflyten har friksjon.",
+        "early_traction": "Første henvendelse(r) er registrert. Signalet: skjer det konsekvent? Fokus: begge parter får god opplevelse.",
+        "growing": "Henvendelser flyter. Signalet: vekst uke over uke og returbrukere.",
+    },
+}
+
+
+def load_config():
+    try:
+        cfg = json.loads(open(CONFIG_FILE).read())
+        for k, v in _DEFAULT_CONFIG.items():
+            cfg.setdefault(k, v)
+        return cfg
+    except (OSError, json.JSONDecodeError):
+        return dict(_DEFAULT_CONFIG)
+
+
+def _read_yaml_field(key):
+    try:
+        with open(H2_CONFIG) as f:
+            for line in f:
+                if key in line:
+                    return line.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+from telegram_env import h2_send_telegram, html_esc
+
+
+def tg_send(msg):
+    try:
+        h2_send_telegram(msg)
+    except Exception as e:
+        print(f"telegram send failed: {e}", flush=True)
+
+
+def convex_run(fn):
+    env = {**os.environ, "CONVEX_DEPLOYMENT": "prod:quirky-buffalo-969"}
+    r = subprocess.run(
+        ["npx", "--yes", "convex", "run", fn],
+        capture_output=True, text=True, timeout=30, env=env, cwd=REPO,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr[:300])
+    return json.loads(r.stdout.strip())
+
+
+def load_history():
+    try:
+        return json.loads(open(STATE_FILE).read())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_history(history):
+    open(STATE_FILE, "w").write(json.dumps(history, indent=2))
+
+
+def delta(now, prev, key):
+    if prev is None:
+        return None
+    return now.get(key, 0) - prev.get(key, 0)
+
+
+def fmt_delta(d, positive_good=True):
+    if d is None:
+        return "ny"
+    sign = "+" if d > 0 else ""
+    arrow = ""
+    if d > 0:
+        arrow = " ↑" if positive_good else " ↓"
+    elif d < 0:
+        arrow = " ↓" if positive_good else " ↑"
+    return f"{sign}{d}{arrow}"
+
+
+def main():
+    cfg = load_config()
+    thresholds = cfg["stage_thresholds"]
+    prompts = cfg["stage_prompts"]
+
+    try:
+        stats = convex_run("listings:statsForPulse")
+    except Exception as e:
+        tg_send(f"<b>jaktformidling ukepuls</b>\n\nFeilet ved henting av data: {html_esc(e)}")
+        return
+
+    now_ts = datetime.now(timezone.utc).isoformat()
+    snapshot = {
+        "ts": now_ts,
+        "listings": stats["totalListings"],
+        "users": stats["totalUsers"],
+        "inquiries": stats["totalInquiries"],
+        "inquiries_7d": stats["newInquiries7d"],
+        "new_listings_7d": stats["newListings7d"],
+        "n_regions": len(stats["regions"]),
+    }
+
+    history = load_history()
+    prev = history[-1] if history else None
+    prev4 = history[-4] if len(history) >= 4 else None
+
+    inquiry_trend = [h.get("inquiries") for h in history[-4:]] + [snapshot["inquiries"]]
+
+    if snapshot["inquiries"] <= thresholds["cold_start_max_inquiries"]:
+        stage = "cold-start"
+        key_signal_now = snapshot["inquiries"]
+        key_signal_prev = prev.get("inquiries", 0) if prev else None
+    else:
+        stage = "growing"
+        key_signal_now = snapshot["inquiries_7d"]
+        key_signal_prev = prev.get("inquiries_7d") if prev else None
+
+    d_inq = delta(snapshot, prev, "inquiries")
+    d_users = delta(snapshot, prev, "users")
+    d_listings = delta(snapshot, prev, "listings")
+
+    weeks_in_stage = sum(1 for h in history if h.get("inquiries", 0) == 0) if stage == "cold-start" else 0
+    trend_txt = " → ".join(str(x) for x in inquiry_trend if x is not None)
+
+    data_block = (
+        f"Stadium: {stage}"
+        + (f" (uke {weeks_in_stage + 1} i cold-start)" if stage == "cold-start" and weeks_in_stage > 0 else "") + "\n"
+        f"Totale henvendelser: {snapshot['inquiries']} ({fmt_delta(d_inq)})\n"
+        f"Henvendelser siste 7d: {snapshot['inquiries_7d']}\n"
+        f"Brukere: {snapshot['users']} ({fmt_delta(d_users)})\n"
+        f"Annonser: {snapshot['listings']} ({fmt_delta(d_listings)})\n"
+        f"Regioner: {snapshot['n_regions']}\n"
+        f"Henveldelses-trend (siste uker): {trend_txt or 'ikke nok data ennå'}\n"
+    )
+
+    stage_context = prompts.get(stage.replace("-", "_"), prompts.get(stage, ""))
+
+    prompt = (
+        "Du gir en ukentlig ærlig vurdering til eieren av jaktformidling.no - "
+        "et norsk jaktmarked i oppstartsfasen.\n\n"
+        "REELE DATA DENNE UKEN:\n" + data_block + "\n"
+        "KONTEKST FOR DETTE STADIET:\n" + stage_context + "\n\n"
+        "Skriv en ÆRLIG 4-5 linjers statusmelding:\n"
+        "- Linje 1: Er dette BEDRE, VERRE eller UENDRET vs forrige uke? "
+        "  Vær direkte. Ikke spin.\n"
+        "- Linje 2-3: Hva forteller dataene deg akkurat nå? "
+        "  Hva er den mest sannsynlige årsaken til det du ser?\n"
+        "- Siste linje: ETT konkret neste steg.\n"
+        "- Norsk bokmål. HTML-tags (<b>, <i>). IKKE markdown.\n"
+        "- Ingen innledning, ingen 'Sendt:', bare meldingsteksten."
+    )
+
+    try:
+        msg = subprocess.run(
+            [CLAUDE, "--print", "--dangerously-skip-permissions",
+             "--model", "claude-sonnet-4-6", prompt],
+            capture_output=True, text=True, timeout=120,
+        ).stdout.strip()
+        # Strip any preamble
+        import re
+        msg = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", msg)
+        lines = msg.splitlines()
+        while lines and lines[0].strip().lower().startswith(("her er", "sendt", "ok,")):
+            lines.pop(0)
+        msg = "\n".join(lines).strip()
+    except Exception:
+        msg = ""
+
+    if not msg:
+        status = "Ingen endring" if d_inq == 0 else ("Fremgang" if (d_inq or 0) > 0 else "Tilbakegang")
+        msg = (
+            f"<b>jaktformidling · {status}</b>\n\n"
+            f"Henvendelser: {snapshot['inquiries']} totalt - "
+            f"{'ingen ennå' if snapshot['inquiries'] == 0 else fmt_delta(d_inq) + ' denne uken'}.\n"
+            f"Brukere: {snapshot['users']} ({fmt_delta(d_users)}). "
+            f"Annonser: {snapshot['listings']}.\n"
+            f"Neste steg: verifiser at kontaktflyten fungerer end-to-end."
+        )
+
+    if "--dry-run" in sys.argv:
+        print(msg)
+        print("\n--- STATE SNAPSHOT ---")
+        print(json.dumps(snapshot, indent=2))
+        return
+
+    # Persist snapshot BEFORE sending (so if send fails, data isn't lost)
+    history.append(snapshot)
+    history = history[-12:]  # keep 12 weeks
+    save_history(history)
+
+    tg_send(msg)
+
+
+if __name__ == "__main__":
+    main()

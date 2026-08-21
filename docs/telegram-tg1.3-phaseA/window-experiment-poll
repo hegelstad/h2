@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# window-experiment-poll
+#
+# Polls the undocumented Anthropic OAuth usage endpoint and appends the
+# 5h resets_at + utilization to a log file. Used to verify whether the
+# window-heartbeat trigger actually shifts the 5h window.
+#
+# Args: <phase>   pre | post
+
+set -euo pipefail
+
+PHASE="${1:-unknown}"
+LOG=/home/ubuntu/h2home/logs/window-experiment.log
+mkdir -p "$(dirname "$LOG")"
+
+ts=$(date -Iseconds)
+
+token=$(jq -r '.claudeAiOauth.accessToken // ""' "$HOME/.claude/.credentials.json" 2>/dev/null || echo "")
+if [[ -z "$token" ]]; then
+    echo "[$ts] phase=$PHASE ERROR=no_token" >> "$LOG"
+    exit 1
+fi
+
+response=$(curl -s --max-time 10 "https://api.anthropic.com/api/oauth/usage" \
+    -H "Authorization: Bearer $token" \
+    -H "anthropic-beta: oauth-2025-04-20" 2>/dev/null || echo "")
+
+resets_at=$(echo "$response" | jq -r '.five_hour.resets_at // ""' 2>/dev/null)
+util=$(echo "$response" | jq -r '.five_hour.utilization // ""' 2>/dev/null)
+
+echo "[$ts] phase=$PHASE resets_at=$resets_at utilization=$util" >> "$LOG"
+
+if [[ "$PHASE" == "post" ]]; then
+    pre_line=$(grep "phase=pre " "$LOG" | tail -1)
+    pre_resets=$(echo "$pre_line" | grep -oP 'resets_at=\K[^ ]+')
+    pre_util=$(echo "$pre_line" | grep -oP 'utilization=\K[^ ]+')
+
+    html_escape() {
+        printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+    }
+
+    if [[ -z "$pre_resets" ]]; then
+        verdict="Mangler pre-måling — kan ikke konkludere."
+    elif [[ "$pre_resets" == "$resets_at" ]]; then
+        verdict="<b>Heartbeat forskyver IKKE vinduet.</b> resets_at uendret før/etter."
+    else
+        verdict="<b>Heartbeat forskyver vinduet!</b> resets_at endret seg."
+    fi
+
+    h2 send telegram --file <(printf '%s\n' "🧪 <b>Window-experiment ferdig</b>
+
+<b>Pre (09:55):</b>
+resets_at: <code>$(html_escape "$pre_resets")</code>
+utilization: $(html_escape "${pre_util}")%
+
+<b>Post (10:02):</b>
+resets_at: <code>$(html_escape "$resets_at")</code>
+utilization: $(html_escape "${util}")%
+
+$verdict")
+fi

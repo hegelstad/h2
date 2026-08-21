@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# eafieldnotes-weekly-stats
+#
+# Fetches the last 7 days of visitor stats for eafieldnotes from Cloudflare
+# Web Analytics and sends a formatted summary to telegram via h2 send.
+#
+# Auth uses a long-lived Cloudflare API token exported as CLOUDFLARE_API_TOKEN
+# from the shared secrets file. The same token authenticates wrangler, so the
+# whole Cloudflare workflow runs non-interactively with no daily OAuth refresh
+# (which gets bot-challenged from this server's IP).
+
+set -euo pipefail
+
+LOG=/home/ubuntu/h2home/logs/eafieldnotes-weekly-stats.log
+mkdir -p "$(dirname "$LOG")"
+log() { echo "[$(date -Iseconds)] $*" >> "$LOG"; }
+
+PROJECT=eafieldnotes
+ACCOUNT_ID=da055fad4fb0133aaa39c38c0e9f4721
+SITE_TAG=5d1f3a3ea78249b5957ccca52ef7d303
+SECRETS_FILE="${CF_SECRETS_FILE:-$HOME/.config/eafieldnotes/cloudflare.env}"
+
+log "starting weekly stats run"
+
+# shellcheck disable=SC1090
+[[ -f "$SECRETS_FILE" ]] && source "$SECRETS_FILE"
+
+TOKEN="${CLOUDFLARE_API_TOKEN:-}"
+if [[ -z "$TOKEN" ]]; then
+    log "ERROR: no CLOUDFLARE_API_TOKEN (checked env + $SECRETS_FILE)"
+    h2 send telegram "❌ <b>eafieldnotes-weekly-stats failed</b>: mangler <code>CLOUDFLARE_API_TOKEN</code> i <code>${SECRETS_FILE}</code>. Lag en Cloudflare API-token og lim den inn til meg."
+    exit 1
+fi
+
+since=$(date -u -d "7 days ago" +%Y-%m-%d)
+until=$(date -u +%Y-%m-%d)
+
+query=$(cat <<GQL
+query Stats(\$accountTag: string!, \$siteTag: string!, \$start: Date!, \$end: Date!) {
+  viewer {
+    accounts(filter: {accountTag: \$accountTag}) {
+      total: rumPageloadEventsAdaptiveGroups(
+        limit: 1
+        filter: {siteTag: \$siteTag, date_geq: \$start, date_leq: \$end}
+      ) {
+        count
+        sum { visits }
+      }
+      topPaths: rumPageloadEventsAdaptiveGroups(
+        limit: 5
+        filter: {siteTag: \$siteTag, date_geq: \$start, date_leq: \$end}
+        orderBy: [count_DESC]
+      ) {
+        count
+        dimensions { requestPath }
+      }
+      topReferers: rumPageloadEventsAdaptiveGroups(
+        limit: 5
+        filter: {siteTag: \$siteTag, date_geq: \$start, date_leq: \$end, refererHost_neq: ""}
+        orderBy: [count_DESC]
+      ) {
+        count
+        dimensions { refererHost }
+      }
+      topCountries: rumPageloadEventsAdaptiveGroups(
+        limit: 5
+        filter: {siteTag: \$siteTag, date_geq: \$start, date_leq: \$end}
+        orderBy: [count_DESC]
+      ) {
+        count
+        dimensions { countryName }
+      }
+    }
+  }
+}
+GQL
+)
+
+# Build JSON body without embedding newlines from heredoc.
+body=$(jq -n --arg q "$query" --arg account "$ACCOUNT_ID" --arg site "$SITE_TAG" --arg start "$since" --arg end "$until" \
+    '{query: $q, variables: {accountTag: $account, siteTag: $site, start: $start, end: $end}}')
+
+log "querying GraphQL: $since → $until"
+response=$(curl -s --max-time 15 "https://api.cloudflare.com/client/v4/graphql" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/json" \
+    --data "$body" 2>/dev/null || echo "")
+
+if ! echo "$response" | jq -e '.data.viewer.accounts[0]' >/dev/null 2>&1; then
+    log "GraphQL query failed: $response"
+    err=$(echo "$response" | jq -r '.errors[0].message // "unknown error"' 2>/dev/null || echo "unparseable")
+    err_esc=$(printf '%s' "$err" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+    h2 send telegram "❌ <b>eafieldnotes-weekly-stats failed</b>
+Period $since → $until
+Error: <code>${err_esc}</code>"
+    exit 1
+fi
+
+total=$(echo "$response" | jq -r '.data.viewer.accounts[0].total[0].count // 0')
+visits=$(echo "$response" | jq -r '.data.viewer.accounts[0].total[0].sum.visits // 0')
+
+if [[ "$visits" -gt 0 ]]; then
+    pages_per_visit=$(awk -v p="$total" -v v="$visits" 'BEGIN { printf "%.2f", p/v }')
+else
+    pages_per_visit="—"
+fi
+
+dashboard_url="https://dash.cloudflare.com/${ACCOUNT_ID}/eafieldnotes.com/analytics/web/overview"
+
+format_list() {
+    local jq_path="$1"
+    local result
+    result=$(echo "$response" | jq -r "$jq_path" 2>/dev/null)
+    if [[ -z "$result" ]]; then
+        echo "- (no data)"
+    else
+        echo "$result"
+    fi
+}
+
+top_paths=$(format_list '.data.viewer.accounts[0].topPaths // [] | map("- <code>\(.dimensions.requestPath | @html)</code> — \(.count)") | .[]')
+top_refs=$(format_list '.data.viewer.accounts[0].topReferers // [] | map("- \(.dimensions.refererHost | @html) — \(.count)") | .[]')
+top_countries=$(format_list '.data.viewer.accounts[0].topCountries // [] | map("- \(.dimensions.countryName | @html) — \(.count)") | .[]')
+
+period_label="$(date -d "$since" +"%d %b") → $(date -d "$until" +"%d %b %Y")"
+
+# ------- Google Search Console section -------
+GCLOUD=/home/ubuntu/google-cloud-sdk/bin/gcloud
+GSC_PROJECT=eafieldnotes-analytics
+GSC_SITE="sc-domain:eafieldnotes.com"
+gsc_section=""
+
+if [[ -x "$GCLOUD" ]]; then
+    gsc_token=$("$GCLOUD" auth application-default print-access-token 2>/dev/null || echo "")
+fi
+
+if [[ -n "${gsc_token:-}" ]]; then
+    log "querying Search Console for $since → $until"
+    gsc_total=$(curl -s --max-time 15 -X POST \
+        "https://www.googleapis.com/webmasters/v3/sites/$(printf %s "$GSC_SITE" | jq -sRr @uri)/searchAnalytics/query" \
+        -H "Authorization: Bearer $gsc_token" \
+        -H "x-goog-user-project: $GSC_PROJECT" \
+        -H "Content-Type: application/json" \
+        -d "{\"startDate\":\"$since\",\"endDate\":\"$until\",\"rowLimit\":1}" 2>/dev/null || echo "{}")
+
+    gsc_queries=$(curl -s --max-time 15 -X POST \
+        "https://www.googleapis.com/webmasters/v3/sites/$(printf %s "$GSC_SITE" | jq -sRr @uri)/searchAnalytics/query" \
+        -H "Authorization: Bearer $gsc_token" \
+        -H "x-goog-user-project: $GSC_PROJECT" \
+        -H "Content-Type: application/json" \
+        -d "{\"startDate\":\"$since\",\"endDate\":\"$until\",\"dimensions\":[\"query\"],\"rowLimit\":5}" 2>/dev/null || echo "{}")
+
+    gsc_pages=$(curl -s --max-time 15 -X POST \
+        "https://www.googleapis.com/webmasters/v3/sites/$(printf %s "$GSC_SITE" | jq -sRr @uri)/searchAnalytics/query" \
+        -H "Authorization: Bearer $gsc_token" \
+        -H "x-goog-user-project: $GSC_PROJECT" \
+        -H "Content-Type: application/json" \
+        -d "{\"startDate\":\"$since\",\"endDate\":\"$until\",\"dimensions\":[\"page\"],\"rowLimit\":5}" 2>/dev/null || echo "{}")
+
+    clicks=$(echo "$gsc_total" | jq -r '.rows[0].clicks // 0')
+    impressions=$(echo "$gsc_total" | jq -r '.rows[0].impressions // 0')
+    avg_ctr=$(echo "$gsc_total" | jq -r '(.rows[0].ctr // 0) * 100 | . * 100 | round / 100')
+    avg_pos=$(echo "$gsc_total" | jq -r '.rows[0].position // 0 | . * 10 | round / 10')
+
+    top_queries=$(echo "$gsc_queries" | jq -r '.rows // [] | map("- <code>\(.keys[0] | @html)</code> — \(.clicks) klikk / \(.impressions) impr (pos \(.position | . * 10 | round / 10))") | .[]')
+    top_landing=$(echo "$gsc_pages" | jq -r '.rows // [] | map("- <code>\(.keys[0] | sub("https://eafieldnotes.com"; "") | @html)</code> — \(.clicks) klikk / \(.impressions) impr") | .[]')
+
+    if [[ "$impressions" == "0" || -z "$impressions" ]]; then
+        gsc_section=$(printf '\n<b>Google Search Console:</b>\nIngen data ennå (Google trenger 2-4 dager etter verifisering før data dukker opp).')
+    else
+        [[ -z "$top_queries" ]] && top_queries="- (ingen queries med impressions)"
+        [[ -z "$top_landing" ]] && top_landing="- (ingen landingssider med impressions)"
+        gsc_section=$(cat <<GSC
+
+<b>Google Search Console:</b>
+<b>Klikk:</b> $clicks
+<b>Impressions:</b> $impressions
+<b>Snitt CTR:</b> ${avg_ctr}%
+<b>Snitt posisjon:</b> $avg_pos
+
+<b>Top søkequeries:</b>
+$top_queries
+
+<b>Top landingssider (organisk):</b>
+$top_landing
+GSC
+)
+    fi
+else
+    log "skipping GSC section (no ADC token)"
+fi
+
+
+# --- Affiliate clicks, readers only ---------------------------------------
+# Nobody was watching this table, which is how 1039 bot clicks accumulated
+# unnoticed while Amazon reported 206 and we drew the wrong conclusion from
+# it. human_clicks is the filtered view; the raw count is shown beside it so
+# the ratio itself stays visible.
+aff_section=""
+if [[ -f "$HOME/.config/eafieldnotes/cloudflare.env" ]]; then
+    set -a; . "$HOME/.config/eafieldnotes/cloudflare.env"; set +a
+    aff_sql="SELECT
+      (SELECT COUNT(*) FROM human_clicks WHERE ts >= datetime('now','-7 days')) AS human7,
+      (SELECT COUNT(*) FROM clicks      WHERE ts >= datetime('now','-7 days')) AS raw7,
+      (SELECT COUNT(*) FROM human_clicks WHERE ts >= datetime('now','-7 days') AND country='US') AS us7,
+      (SELECT COUNT(*) FROM human_clicks) AS human_total"
+    aff_json=$(cd /home/ubuntu/h2home/projects/workspace/eafieldnotes && \
+        npx --yes wrangler d1 execute eafieldnotes --remote \
+        --config workers/go-redirect/wrangler.toml --command "$aff_sql" --json 2>/dev/null || echo "")
+    if [[ -n "$aff_json" ]]; then
+        h7=$(echo "$aff_json" | jq -r '.[0].results[0].human7 // 0')
+        r7=$(echo "$aff_json" | jq -r '.[0].results[0].raw7 // 0')
+        u7=$(echo "$aff_json" | jq -r '.[0].results[0].us7 // 0')
+        ht=$(echo "$aff_json" | jq -r '.[0].results[0].human_total // 0')
+        aff_section=$(printf '\n<b>Amazon-klikk (kun ekte lesere):</b>\n<b>Denne uka:</b> %s  (av %s logget — resten er bots)\n<b>Herav USA:</b> %s  — det er bare disse som kan gi kvalifiserende salg\n<b>Totalt siden start:</b> %s' "$h7" "$r7" "$u7" "$ht")
+    fi
+fi
+
+# Refresh the live growth-machine dashboard so the linked view is current.
+/home/ubuntu/h2home/tools/growth-dashboard-worker/refresh.sh >/dev/null 2>&1 || log "dashboard refresh failed"
+dash_token=$(cat /home/ubuntu/h2home/tools/growth-dashboard-worker/.dashtoken 2>/dev/null || echo "")
+
+message=$(cat <<MSG
+📊 <b>Ukentlig rapport: eafieldnotes</b>
+Periode: $period_label
+
+🌱 Åpne Vekstmaskin-dashbordet: https://dash.eafieldnotes.com/?k=${dash_token} (viser endring vs forrige uke)
+
+<b>Pageloads:</b> $total
+<b>Visits:</b> $visits
+<b>Sider per besøk:</b> $pages_per_visit
+
+<b>Top pages:</b>
+$top_paths
+
+<b>Top referrers:</b>
+$top_refs
+
+<b>Top countries:</b>
+$top_countries
+$aff_section
+$gsc_section
+
+📊 Åpne Cloudflare-dashbord: $dashboard_url
+🔍 Åpne Search Console: https://search.google.com/search-console?resource_id=sc-domain%3Aeafieldnotes.com
+Live URL: https://eafieldnotes.com/
+MSG
+)
+
+log "sending to telegram (pageloads=$total visits=$visits)"
+h2 send telegram --file <(printf '%s\n' "$message") 2>&1 | tee -a "$LOG"
+
+log "done"

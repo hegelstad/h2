@@ -1,0 +1,69 @@
+#!/bin/bash
+# Coaching check-in script - runs via systemd timer
+# Usage: coaching-checkin monday|friday
+
+set -euo pipefail
+
+# shellcheck source=/dev/null
+source /home/ubuntu/h2home/bin/claude-auth.sh
+
+TYPE="${1:-}"
+if [[ -z "$TYPE" ]]; then
+  echo "Usage: coaching-checkin monday|friday" >&2
+  exit 1
+fi
+
+MEMORY_DIR="/home/ubuntu/h2home/claude-config/default/projects/-home-ubuntu-h2home/memory"
+H2_DIR="/home/ubuntu/h2home"
+
+# Read memory files for context
+SIDE_HUSTLES=$(cat "$MEMORY_DIR/project_side_hustles.md" 2>/dev/null || echo "Ingen prosjektinfo tilgjengelig")
+COACHING_STYLE=$(cat "$MEMORY_DIR/feedback_coaching_style.md" 2>/dev/null || echo "Vær direkte og proaktiv")
+
+if [[ "$TYPE" == "monday" ]]; then
+  PROMPT="Du er en fremdriftscoach som sender en mandags check-in via Telegram.
+
+Kontekst om brukerens prosjekter:
+$SIDE_HUSTLES
+
+Coaching-preferanser:
+$COACHING_STYLE
+
+Det er mandag morgen. Skriv en kort, energisk check-in melding. Innholdet skal:
+- Kort oppsummere hvor ting står på side hustles
+- Spørre hva som er fokus denne uken
+- Gi ett konkret forslag til noe som kan gjøres i løpet av uken
+- Være direkte og motiverende, ikke langdrygt
+
+Send meldingen med denne kommandoen:
+h2 send telegram \"din melding her\"
+
+Bruk norsk (bokmål) med æøå. Vanlig tekst med ekte linjeskift. HTML-tags: <b>, <i>, <code>. Ikke markdown (**fet** / \`kode\`)."
+
+elif [[ "$TYPE" == "friday" ]]; then
+  PROMPT="Du er en fremdriftscoach som sender en fredags review via Telegram.
+
+Kontekst om brukerens prosjekter:
+$SIDE_HUSTLES
+
+Coaching-preferanser:
+$COACHING_STYLE
+
+Det er fredag ettermiddag. Skriv en kort review-melding. Innholdet skal:
+- Spørre hva som ble gjort denne uken på side hustles
+- Være ærlig og direkte. Hvis brukeren ikke har rapportert fremgang, vær vennlig men tydelig på at ting må skje
+- Avslutt med en liten utfordring eller motivasjon for helgen
+
+Send meldingen med denne kommandoen:
+h2 send telegram \"din melding her\"
+
+Bruk norsk (bokmål) med æøå. Vanlig tekst med ekte linjeskift. HTML-tags: <b>, <i>, <code>. Ikke markdown (**fet** / \`kode\`)."
+else
+  echo "Unknown type: $TYPE (use monday or friday)" >&2
+  exit 1
+fi
+
+export H2_DIR
+cd "$H2_DIR"
+
+claude --print --dangerously-skip-permissions --allowedTools "Bash(h2:*)" --model claude-sonnet-4-6 "$PROMPT"

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Alert when someone is guessing at the MCP tokens.
+#
+# The five MCP servers are reachable from the open internet through the
+# Cloudflare tunnel, and nothing in front of them rate-limits or blocks. A
+# measured burst of 40 wrong tokens went through in 1.9 seconds and nobody
+# would have known: the servers log the refusal, but no one reads journald.
+#
+# This closes that gap — not by stopping the guessing, which the token length
+# already makes impractical, but by making it impossible for it to go on
+# unnoticed. Runs from cron every ten minutes.
+set -uo pipefail
+
+SERVICES=(premiumize-mcp real-debrid-mcp spotify-mcp soulseek-mcp music-version-mcp)
+WINDOW="10 min ago"
+# A wrong token now and then is a stale bookmark or a scanner. A hundred in ten
+# minutes is somebody working through a list.
+THRESHOLD=100
+STATE="$HOME/h2home/state/mcp-auth-alert.last"
+COOLDOWN_SECONDS=$((6 * 3600))
+
+total=0
+detail=""
+for svc in "${SERVICES[@]}"; do
+  n=$(journalctl -u "$svc" --since "$WINDOW" --no-pager 2>/dev/null | grep -c "401" || true)
+  total=$((total + n))
+  [ "$n" -gt 0 ] && detail="${detail}- <b>${svc}</b>: ${n}
+"
+done
+
+[ "$total" -lt "$THRESHOLD" ] && exit 0
+
+now=$(date +%s)
+if [ -f "$STATE" ]; then
+  last=$(cat "$STATE" 2>/dev/null || echo 0)
+  [ $((now - last)) -lt "$COOLDOWN_SECONDS" ] && exit 0
+fi
+mkdir -p "$(dirname "$STATE")"
+echo "$now" > "$STATE"
+
+body=$(mktemp)
+cat > "$body" <<EOF
+<b>⚠️ Noen gjetter på MCP-nøklene dine</b>
+
+<b>${total}</b> avviste innlogginger de siste ti minuttene:
+${detail}
+Nøklene er 48 tegn, så det tar praktisk talt uendelig tid å treffe. Men trafikken kommer fra noen som prøver, ikke fra en gammel bokmerke.
+
+Vurder: skru av tunnelen for tjenesten det gjelder til det gir seg, eller la det være hvis det roer seg. Neste varsel tidligst om seks timer.
+EOF
+
+h2 send telegram --file "$body"
+rm -f "$body"
