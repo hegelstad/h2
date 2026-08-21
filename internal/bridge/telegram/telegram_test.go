@@ -505,12 +505,74 @@ func TestStartStop_ReplyRouting(t *testing.T) {
 	if len(received) != 1 {
 		t.Fatalf("got %d messages, want 1", len(received))
 	}
-	// Reply to a [researcher] tagged message should route to researcher.
+	// Reply to a [researcher] tagged message should route to researcher
+	// and prepend the quoted original (tag stripped) as reply-context.
 	if received[0].agent != "researcher" {
 		t.Errorf("agent = %q, want %q", received[0].agent, "researcher")
 	}
-	if received[0].body != "what's the status?" {
-		t.Errorf("body = %q, want %q", received[0].body, "what's the status?")
+	wantBody := "[in reply to]\n> here are the results\n\nwhat's the status?"
+	if received[0].body != wantBody {
+		t.Errorf("body = %q, want %q", received[0].body, wantBody)
+	}
+}
+
+func TestWithReplyContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		original string
+		body     string
+		want     string
+	}{
+		{
+			name:     "agent tag stripped and quoted",
+			original: "[researcher] here are the results",
+			body:     "what's the status?",
+			want:     "[in reply to]\n> here are the results\n\nwhat's the status?",
+		},
+		{
+			name:     "h2 envelope stripped",
+			original: "[h2 message from: concierge] build complete",
+			body:     "ship it",
+			want:     "[in reply to]\n> build complete\n\nship it",
+		},
+		{
+			name:     "multiline original blockquoted per line",
+			original: "[coder] line one\nline two",
+			body:     "looks good",
+			want:     "[in reply to]\n> line one\n> line two\n\nlooks good",
+		},
+		{
+			name:     "empty original leaves body unchanged",
+			original: "",
+			body:     "just text",
+			want:     "just text",
+		},
+		{
+			name:     "envelope-only original leaves body unchanged",
+			original: "[researcher]   ",
+			body:     "ping",
+			want:     "ping",
+		},
+		{
+			name:     "no prefix on original",
+			original: "plain bot text",
+			body:     "ack",
+			want:     "[in reply to]\n> plain bot text\n\nack",
+		},
+		{
+			name:     "long original truncated",
+			original: strings.Repeat("x", maxReplyQuoteRunes+100),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("x", maxReplyQuoteRunes) + "…\n\nok",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withReplyContext(tt.original, tt.body)
+			if got != tt.want {
+				t.Errorf("withReplyContext(%q, %q) = %q, want %q", tt.original, tt.body, got, tt.want)
+			}
+		})
 	}
 }
 

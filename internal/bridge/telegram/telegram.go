@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ const (
 	maxMessageLen = 4096
 	// maxPages is the maximum number of messages to send for a single response.
 	maxPages = 3
+	// maxReplyQuoteRunes caps quoted original text so a long bot message
+	// cannot blow up the inbound body delivered to the agent.
+	maxReplyQuoteRunes = 1500
 )
 
 // Telegram implements bridge.Bridge, bridge.Sender, and bridge.Receiver
@@ -142,13 +146,44 @@ func (t *Telegram) poll(ctx context.Context, handler bridge.InboundHandler) {
 				continue
 			}
 			agent, body := bridge.ParseAgentPrefix(u.Message.Text)
-			// If no explicit prefix, check reply-to message for agent tag.
-			if agent == "" && u.Message.ReplyToMessage != nil {
-				agent = bridge.ParseAgentTag(u.Message.ReplyToMessage.Text)
+			if u.Message.ReplyToMessage != nil {
+				// If no explicit prefix, route via the replied-to agent tag.
+				if agent == "" {
+					agent = bridge.ParseAgentTag(u.Message.ReplyToMessage.Text)
+				}
+				body = withReplyContext(u.Message.ReplyToMessage.Text, body)
 			}
 			handler(agent, body)
 		}
 	}
+}
+
+// withReplyContext prepends a blockquoted copy of the replied-to message
+// so the receiving agent sees both the new text and what it was a reply to.
+// Leading [h2 message from: ...] / [agent] prefixes are stripped from the
+// quote. Empty originals (or envelope-only originals) leave body unchanged.
+func withReplyContext(original, body string) string {
+	quoted := quoteReplyOriginal(original)
+	if quoted == "" {
+		return body
+	}
+	return "[in reply to]\n" + quoted + "\n\n" + body
+}
+
+func quoteReplyOriginal(original string) string {
+	text := strings.TrimSpace(bridge.StripH2Envelope(original))
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) > maxReplyQuoteRunes {
+		text = string(runes[:maxReplyQuoteRunes]) + "…"
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (t *Telegram) execAndReply(ctx context.Context, cmd, args string) {
