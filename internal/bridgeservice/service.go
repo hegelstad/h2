@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"h2/internal/bridge"
+	"h2/internal/bridge/telegram"
 	"h2/internal/session/message"
 	"h2/internal/socketdir"
 )
@@ -37,6 +38,12 @@ type Service struct {
 	queryAgentStateFn  func(string) (string, error)
 	cancel             context.CancelFunc
 
+	// Outbound mirror: a passive copy of every message sent to the chat is
+	// delivered to a secondary agent so it stays aware of what the user saw.
+	mirrorEnabled bool
+	mirrorDynamic bool   // follow the live concierge target
+	mirrorTarget  string // fixed target when !mirrorDynamic
+
 	// Status tracking.
 	startTime        time.Time
 	lastActivityTime time.Time
@@ -60,6 +67,12 @@ type ServiceOpts struct {
 	// the recipient agent for every inbound message from the bridge. This
 	// causes the agent to receive an idle reminder if it hasn't responded.
 	ExpectsResponse bool
+
+	// MirrorTarget controls the passive outbound mirror:
+	//   - nil: mirror to the live concierge agent (dynamic).
+	//   - "" (pointer to empty): mirroring disabled.
+	//   - "name": always mirror to that fixed agent.
+	MirrorTarget *string
 }
 
 // New creates a bridge service.
@@ -77,9 +90,65 @@ func New(bridges []bridge.Bridge, name, concierge, pod, socketDir string, allowe
 	}
 	if len(opts) > 0 {
 		s.expectsResponse = opts[0].ExpectsResponse
+		s.configureMirror(bridges, opts[0].MirrorTarget)
 	}
 	s.queryAgentStateFn = s.queryAgentState
 	return s
+}
+
+// configureMirror resolves the mirror-target config and, when mirroring is
+// enabled, installs the mirror sink on every Telegram bridge so each
+// successful outbound copy is delivered to the resolved target agent.
+func (s *Service) configureMirror(bridges []bridge.Bridge, target *string) {
+	switch {
+	case target == nil:
+		s.mirrorEnabled = true
+		s.mirrorDynamic = true
+	case *target == "":
+		s.mirrorEnabled = false
+	default:
+		s.mirrorEnabled = true
+		s.mirrorTarget = *target
+	}
+	if !s.mirrorEnabled {
+		return
+	}
+	for _, b := range bridges {
+		if tg, ok := b.(*telegram.Telegram); ok {
+			tg.Mirror = s.mirrorOutbound
+		}
+	}
+}
+
+// resolveMirrorTarget returns the agent that should receive mirrored copies,
+// or "" when mirroring is disabled or no target is currently available.
+func (s *Service) resolveMirrorTarget() string {
+	if !s.mirrorEnabled {
+		return ""
+	}
+	if s.mirrorDynamic {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return s.concierge
+	}
+	return s.mirrorTarget
+}
+
+// mirrorOutbound delivers a mirrored copy to the resolved target agent. It is
+// the sink installed on Telegram bridges; the bridge invokes it best-effort in
+// its own goroutine, so a nil target or delivery error is simply reported back.
+func (s *Service) mirrorOutbound(text string) error {
+	target := s.resolveMirrorTarget()
+	if target == "" {
+		return nil
+	}
+	sockPath := filepath.Join(s.socketDir, socketdir.Format(socketdir.TypeAgent, target))
+	return s.deliverRequest(sockPath, target, &message.Request{
+		Type:     "send",
+		Priority: "normal",
+		From:     s.name,
+		Body:     text,
+	})
 }
 
 // Run starts all receiver bridges and the bridge socket listener.
@@ -442,13 +511,6 @@ func (s *Service) sendToAgent(name, from, body string) error {
 		}
 	}
 
-	conn, err := net.Dial("unix", sockPath)
-	if err != nil {
-		s.removeTriggerBestEffort(sockPath, triggerID)
-		return fmt.Errorf("connect to %s: %w", name, err)
-	}
-	defer conn.Close()
-
 	req := &message.Request{
 		Type:     "send",
 		Priority: "normal",
@@ -460,18 +522,32 @@ func (s *Service) sendToAgent(name, from, body string) error {
 		req.ERTriggerID = triggerID
 	}
 
-	if err := message.SendRequest(conn, req); err != nil {
+	if err := s.deliverRequest(sockPath, name, req); err != nil {
 		s.removeTriggerBestEffort(sockPath, triggerID)
+		return err
+	}
+	return nil
+}
+
+// deliverRequest dials an agent socket and sends a single request, returning
+// the delivery error (if any). It performs no trigger bookkeeping, so it is
+// shared by both the inbound routing path and the passive outbound mirror.
+func (s *Service) deliverRequest(sockPath, name string, req *message.Request) error {
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("connect to %s: %w", name, err)
+	}
+	defer conn.Close()
+
+	if err := message.SendRequest(conn, req); err != nil {
 		return fmt.Errorf("send request: %w", err)
 	}
 
 	resp, err := message.ReadResponse(conn)
 	if err != nil {
-		s.removeTriggerBestEffort(sockPath, triggerID)
 		return fmt.Errorf("read response: %w", err)
 	}
 	if !resp.OK {
-		s.removeTriggerBestEffort(sockPath, triggerID)
 		return fmt.Errorf("agent error: %s", resp.Error)
 	}
 	return nil

@@ -81,6 +81,68 @@ users:
 	}
 }
 
+func TestLoadFrom_MirrorTarget(t *testing.T) {
+	dir := t.TempDir()
+
+	// Omitted -> nil pointer (service treats as dynamic concierge).
+	pathOmitted := filepath.Join(dir, "omitted.yaml")
+	if err := os.WriteFile(pathOmitted, []byte(`bridges:
+  b:
+    telegram:
+      bot_token: "t"
+      chat_id: 1
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFrom(pathOmitted)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if mt := cfg.Bridges["b"].Telegram.MirrorTarget; mt != nil {
+		t.Errorf("omitted mirror_target = %v, want nil", *mt)
+	}
+
+	// Explicit value -> pointer to that string.
+	pathSet := filepath.Join(dir, "set.yaml")
+	if err := os.WriteFile(pathSet, []byte(`bridges:
+  b:
+    telegram:
+      bot_token: "t"
+      chat_id: 1
+      mirror_target: "watcher"
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadFrom(pathSet)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	mt := cfg.Bridges["b"].Telegram.MirrorTarget
+	if mt == nil || *mt != "watcher" {
+		t.Errorf("mirror_target = %v, want watcher", mt)
+	}
+
+	// Explicit empty -> pointer to "" (disables mirroring).
+	pathEmpty := filepath.Join(dir, "empty.yaml")
+	if err := os.WriteFile(pathEmpty, []byte(`bridges:
+  b:
+    telegram:
+      bot_token: "t"
+      chat_id: 1
+      mirror_target: ""
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = LoadFrom(pathEmpty)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	mt = cfg.Bridges["b"].Telegram.MirrorTarget
+	if mt == nil || *mt != "" {
+		t.Errorf("mirror_target = %v, want empty-string pointer", mt)
+	}
+}
+
 func TestLoadFrom_MissingFile(t *testing.T) {
 	cfg, err := LoadFrom("/nonexistent/path/config.yaml")
 	if err != nil {

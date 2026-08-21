@@ -40,11 +40,18 @@ type Telegram struct {
 	// If empty, defaults to "https://api.telegram.org".
 	BaseURL string
 
-	client http.Client
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	offset int64
+	// Mirror, if non-nil, receives a best-effort copy of the full text of
+	// every message successfully sent to the chat (tagged with mirrorTag).
+	// It runs in its own goroutine so a slow or failing sink can never block
+	// or fail the user-facing send; its error is logged and swallowed.
+	Mirror func(text string) error
+
+	client   http.Client
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	mirrorWG sync.WaitGroup
+	mu       sync.Mutex
+	offset   int64
 
 	streamMu sync.Mutex
 }
@@ -53,6 +60,7 @@ func (t *Telegram) Name() string { return "telegram" }
 
 func (t *Telegram) Close() error {
 	t.Stop()
+	t.mirrorWG.Wait()
 	return nil
 }
 

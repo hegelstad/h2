@@ -19,7 +19,33 @@ import (
 const (
 	// botAPITimeout bounds every Bot API call except getUpdates (long poll).
 	botAPITimeout = 30 * time.Second
+
+	// mirrorTag prefixes every mirrored outbound copy so the recipient
+	// (e.g. concierge) can tell it apart from a direct message.
+	mirrorTag = "[telegram-out] "
 )
+
+// mirror enqueues a best-effort copy of a successfully-sent message to the
+// configured sink. It is fire-and-forget: the copy runs in its own goroutine
+// and any error (or panic) is logged, never propagated, so mirroring can
+// neither block nor fail the user-facing send.
+func (t *Telegram) mirror(text string) {
+	if t.Mirror == nil || text == "" {
+		return
+	}
+	t.mirrorWG.Add(1)
+	go func() {
+		defer t.mirrorWG.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("telegram mirror: panic: %v", r)
+			}
+		}()
+		if err := t.Mirror(mirrorTag + text); err != nil {
+			log.Printf("telegram mirror: %v", err)
+		}
+	}()
+}
 
 // Send renders text as Telegram chat HTML and persists it with
 // sendMessage + parse_mode=HTML. A genuine render or persist error
@@ -30,12 +56,21 @@ func (t *Telegram) Send(ctx context.Context, text string) error {
 	html, err := tghtml.HTML(text)
 	if err != nil {
 		log.Printf("telegram html: %v; falling back to plain sendMessage", err)
-		return t.sendPlain(ctx, text)
+		if err := t.sendPlain(ctx, text); err != nil {
+			return err
+		}
+		t.mirror(text)
+		return nil
 	}
 	if err := t.sendHTML(ctx, html); err != nil {
 		log.Printf("telegram sendMessage HTML: %v; falling back to plain", err)
-		return t.sendPlain(ctx, text)
+		if err := t.sendPlain(ctx, text); err != nil {
+			return err
+		}
+		t.mirror(text)
+		return nil
 	}
+	t.mirror(text)
 	return nil
 }
 
@@ -169,11 +204,20 @@ func (s *Stream) Close() error {
 	html, err := tghtml.HTML(text)
 	if err != nil {
 		log.Printf("telegram persist render: %v; falling back to plain", err)
-		return s.t.sendPlain(s.ctx, text)
+		if err := s.t.sendPlain(s.ctx, text); err != nil {
+			return err
+		}
+		s.t.mirror(text)
+		return nil
 	}
 	if err := s.t.sendHTML(s.ctx, html); err != nil {
 		log.Printf("telegram sendMessage HTML: %v; falling back to plain", err)
-		return s.t.sendPlain(s.ctx, text)
+		if err := s.t.sendPlain(s.ctx, text); err != nil {
+			return err
+		}
+		s.t.mirror(text)
+		return nil
 	}
+	s.t.mirror(text)
 	return nil
 }

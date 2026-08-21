@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -48,6 +49,93 @@ func TestSend(t *testing.T) {
 	if gotMode != "HTML" {
 		t.Errorf("parse_mode = %q, want HTML", gotMode)
 	}
+}
+
+func TestSend_EscapesUntaggedSpecials(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+
+	// Stray <, & and > in untagged prose must be entity-escaped so the HTML
+	// parse_mode doesn't reject the message with a 400.
+	if err := tg.Send(context.Background(), "a < b & c > d"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if strings.ContainsAny(gotText, "<>") || strings.Contains(gotText, " & ") {
+		t.Errorf("text not escaped: %q", gotText)
+	}
+	for _, want := range []string{"&lt;", "&amp;", "&gt;"} {
+		if !strings.Contains(gotText, want) {
+			t.Errorf("text %q missing %q", gotText, want)
+		}
+	}
+}
+
+func TestSend_MirrorsToSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "hello from h2"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 1 {
+		t.Fatalf("mirror called %d times, want 1", len(mirrored))
+	}
+	if want := "[telegram-out] hello from h2"; mirrored[0] != want {
+		t.Errorf("mirror = %q, want %q", mirrored[0], want)
+	}
+}
+
+func TestSend_MirrorFailureDoesNotFailSend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			return fmt.Errorf("mirror sink is down")
+		},
+	}
+
+	// A failing mirror sink must never surface as a send error.
+	if err := tg.Send(context.Background(), "critical alert"); err != nil {
+		t.Fatalf("Send returned error from mirror failure: %v", err)
+	}
+	tg.mirrorWG.Wait()
 }
 
 func TestSend_ChunksLongMessage(t *testing.T) {

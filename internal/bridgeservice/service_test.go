@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"h2/internal/bridge"
+	"h2/internal/bridge/telegram"
 	"h2/internal/session/message"
 	"h2/internal/socketdir"
 )
@@ -251,6 +252,91 @@ func waitForSocket(t *testing.T, path string) {
 }
 
 // --- Inbound routing tests ---
+
+// --- Outbound mirror tests ---
+
+func strptr(s string) *string { return &s }
+
+func TestConfigureMirror_States(t *testing.T) {
+	cases := []struct {
+		name        string
+		target      *string
+		wantEnabled bool
+		wantDynamic bool
+		wantTarget  string
+	}{
+		{"omitted follows concierge", nil, true, true, ""},
+		{"empty disables", strptr(""), false, false, ""},
+		{"fixed target", strptr("watcher"), true, false, "watcher"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := New(nil, "alice", "concierge", "", t.TempDir(), nil,
+				ServiceOpts{MirrorTarget: tc.target})
+			if svc.mirrorEnabled != tc.wantEnabled {
+				t.Errorf("mirrorEnabled = %v, want %v", svc.mirrorEnabled, tc.wantEnabled)
+			}
+			if svc.mirrorDynamic != tc.wantDynamic {
+				t.Errorf("mirrorDynamic = %v, want %v", svc.mirrorDynamic, tc.wantDynamic)
+			}
+			if svc.mirrorTarget != tc.wantTarget {
+				t.Errorf("mirrorTarget = %q, want %q", svc.mirrorTarget, tc.wantTarget)
+			}
+		})
+	}
+}
+
+func TestConfigureMirror_InstallsSinkOnTelegram(t *testing.T) {
+	tg := &telegram.Telegram{Token: "TOKEN", ChatID: 1}
+	// nil MirrorTarget -> dynamic concierge -> sink installed.
+	New([]bridge.Bridge{tg}, "alice", "concierge", "", t.TempDir(), nil, ServiceOpts{})
+	if tg.Mirror == nil {
+		t.Fatal("expected mirror sink installed on telegram bridge")
+	}
+
+	// Explicit empty -> disabled -> no sink installed.
+	tg2 := &telegram.Telegram{Token: "TOKEN", ChatID: 1}
+	New([]bridge.Bridge{tg2}, "alice", "concierge", "", t.TempDir(), nil,
+		ServiceOpts{MirrorTarget: strptr("")})
+	if tg2.Mirror != nil {
+		t.Error("expected no mirror sink when disabled")
+	}
+}
+
+func TestMirrorOutbound_DeliversToDynamicConcierge(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil, ServiceOpts{})
+
+	if err := svc.mirrorOutbound("[telegram-out] hi there"); err != nil {
+		t.Fatalf("mirrorOutbound: %v", err)
+	}
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 mirrored request, got %d", len(reqs))
+	}
+	if reqs[0].From != "alice" {
+		t.Errorf("from = %q, want alice", reqs[0].From)
+	}
+	if reqs[0].Body != "[telegram-out] hi there" {
+		t.Errorf("body = %q", reqs[0].Body)
+	}
+}
+
+func TestMirrorOutbound_DisabledNoDelivery(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil,
+		ServiceOpts{MirrorTarget: strptr("")})
+
+	if err := svc.mirrorOutbound("[telegram-out] hi"); err != nil {
+		t.Fatalf("mirrorOutbound: %v", err)
+	}
+	if reqs := concierge.Received(); len(reqs) != 0 {
+		t.Errorf("expected no delivery when disabled, got %d", len(reqs))
+	}
+}
 
 func TestHandleInbound_AddressedMessage(t *testing.T) {
 	tmpDir := shortTempDir(t)

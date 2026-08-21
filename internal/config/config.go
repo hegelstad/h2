@@ -35,6 +35,14 @@ type TelegramConfig struct {
 	ChatID          int64    `yaml:"chat_id"`
 	AllowedCommands []string `yaml:"allowed_commands,omitempty"`
 	ExpectsResponse bool     `yaml:"expects_response,omitempty"`
+
+	// MirrorTarget names the agent that receives a passive copy of every
+	// outbound message (tagged [telegram-out]) so it stays aware of what the
+	// user saw. Three states:
+	//   - omitted (nil): mirror to the live concierge agent (dynamic).
+	//   - "" (explicit empty): mirroring disabled.
+	//   - "name": always mirror to that fixed agent.
+	MirrorTarget *string `yaml:"mirror_target,omitempty"`
 }
 
 type MacOSNotifyConfig struct {
