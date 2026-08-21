@@ -134,3 +134,24 @@ Out of this range (tg1.3 / `06d50fe`). Not reviewed.
 The four review-focus items hold in the code and in tests I ran (excluding the tg1.5 backoff flake). Mirror cannot fail or delay `Send` even with no concierge socket; untagged `<` `&` `>` are escaped under `parse_mode=HTML`; reply-context strips the leading `[…]` envelope and truncates at 1500 runes. P2s (tagged `&` passthrough, unbounded mirror dial) are worth a follow-up bead, not a merge block.
 
 Do not treat `TestPoll_ExponentialBackoff` as a regression.
+
+---
+
+# R2 confirmation (incorporation of P2/P3 → tg1.6 / tg1.7)
+
+- Range: `eb9c13b` (R1 incorporate) + `b20f853` (tg1.6 tests) + `b5be05d` (tg1.7 Close bound + in-flight cap)
+- Reviewer: grok-reviewer
+- Tests: `go test ./internal/bridge/tghtml/ ./internal/bridge/telegram/ ./internal/bridgeservice/ -skip TestPoll_ExponentialBackoff` ok
+
+## Disposition check
+
+| Finding | Disposition | Landed? |
+|---|---|---|
+| P2 tagged `&` in HTML passthrough | Incorporate | **Yes.** `downconvert` runs `escapeText` on non-tag runs (keeps `&amp;`); `LooksLikeHTML` requires `>` (`\s[^>]*>|/>|>`). Tests: `<b>ok</b> a & b`, existing entity, `see <b foo`, `<br/>`. |
+| P2 mirror `deliverRequest` deadline | Incorporate, 2s **mirror path only** | **Yes.** `mirrorOutbound` → `deliverRequestWithTimeout(..., 2s)`; `sendToAgent` still `timeout=0`. Dial timeout + `conn.SetDeadline`. `TestMirrorOutbound_StuckPeerTimesOut`. tg1.7 also caps 32 in-flight mirrors (drop, Send never waits) and asserts `Close` against a hung listener. |
+| P3 CheckTestIsolation in httptest pkgs | Not incorporate | **Honored in R1.** tg1.7 later added `TestMain` + temp `H2_DIR` anyway — extra, not a reversal of the disposition. |
+| P3 non-ASCII truncation + stacked `[…]` | Incorporate | **Yes.** Loop-`StripH2Envelope`. Table rows: 1501×`ä`, 1501×`🙂`, `[h2 message from:] [researcher]`. |
+
+No new P0/P1. Inbound `sendToAgent` remains unbounded as agreed.
+
+**R2 verdict**: **Approved.** tg1.6 and tg1.7 close the R1 P2s. Approved of tg1.1+tg1.2 stands.
