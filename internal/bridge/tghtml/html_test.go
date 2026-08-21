@@ -71,8 +71,14 @@ func TestLooksLikeHTML(t *testing.T) {
 	if !LooksLikeHTML("<b>bold</b>") {
 		t.Fatal("expected <b> to count as html")
 	}
+	if !LooksLikeHTML("<br/>") {
+		t.Fatal("expected <br/> to count as html")
+	}
 	if LooksLikeHTML("hello **bold**") {
 		t.Fatal("plain text must not look like html")
+	}
+	if LooksLikeHTML("see <b foo") {
+		t.Fatal("unclosed <b foo must not look like html")
 	}
 }
 
@@ -104,6 +110,9 @@ func TestHTML_DownconvertsRich(t *testing.T) {
 		{name: "blockquote kept", in: "<blockquote>q</blockquote>", want: "<blockquote>q</blockquote>"},
 		{name: "strip thinking", in: "<tg-thinking>Thinking...</tg-thinking>hi", want: "hi"},
 		{name: "already chat html", in: "<b>bold</b> and <i>i</i>", want: "<b>bold</b> and <i>i</i>"},
+		{name: "raw amp inside tagged html is escaped", in: "<b>ok</b> a & b", want: "<b>ok</b> a &amp; b"},
+		{name: "existing amp entity inside tagged html is kept", in: "<b>ok</b> a &amp; b", want: "<b>ok</b> a &amp; b"},
+		{name: "raw lt inside tagged html is escaped", in: "<b>ok</b> a < b", want: "<b>ok</b> a &lt; b"},
 		{name: "hr", in: "a<hr>b", want: "a\n———\nb"},
 	}
 	for _, tt := range tests {

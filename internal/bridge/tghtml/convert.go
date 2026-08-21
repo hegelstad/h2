@@ -32,10 +32,16 @@ func downconvert(s string) string {
 	i := 0
 	for i < len(s) {
 		if s[i] != '<' {
-			if skip == 0 {
-				b.WriteByte(s[i])
+			if skip > 0 {
+				i++
+				continue
 			}
-			i++
+			j := i
+			for j < len(s) && s[j] != '<' {
+				j++
+			}
+			b.WriteString(escapeText(s[i:j]))
+			i = j
 			continue
 		}
 		name, closing, selfClose, raw, end, ok := parseTag(s, i)

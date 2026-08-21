@@ -171,7 +171,14 @@ func withReplyContext(original, body string) string {
 }
 
 func quoteReplyOriginal(original string) string {
-	text := strings.TrimSpace(bridge.StripH2Envelope(original))
+	text := strings.TrimSpace(original)
+	for {
+		next := strings.TrimSpace(bridge.StripH2Envelope(text))
+		if next == text {
+			break
+		}
+		text = next
+	}
 	if text == "" {
 		return ""
 	}

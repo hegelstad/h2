@@ -15,7 +15,9 @@ func LooksLikeHTML(text string) bool {
 	return htmlTagRe.MatchString(text)
 }
 
-var htmlTagRe = regexp.MustCompile(`(?i)<(p|br|h[1-6]|ul|ol|li|blockquote|aside|pre|hr|table|tr|td|th|caption|details|summary|figure|figcaption|footer|tg-collage|tg-slideshow|tg-math-block|tg-thinking|b|strong|i|em|u|ins|s|strike|del|code|mark|sub|sup|a|span|tg-spoiler|tg-emoji|tg-time|tg-math|tg-reference)(\s|/|>)`)
+// Require a closing '>' so a prose fragment like "see <b foo" is not
+// classified as HTML (which would skip Render's escaping).
+var htmlTagRe = regexp.MustCompile(`(?i)<(p|br|h[1-6]|ul|ol|li|blockquote|aside|pre|hr|table|tr|td|th|caption|details|summary|figure|figcaption|footer|tg-collage|tg-slideshow|tg-math-block|tg-thinking|b|strong|i|em|u|ins|s|strike|del|code|mark|sub|sup|a|span|tg-spoiler|tg-emoji|tg-time|tg-math|tg-reference)(\s[^>]*>|/>|>)`)
 
 // HTML returns a parse_mode=HTML body for sendMessage: passthrough /
 // downconvert if the body is already HTML, otherwise a deterministic

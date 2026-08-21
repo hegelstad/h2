@@ -147,12 +147,12 @@ func (s *Service) mirrorOutbound(text string) error {
 		return nil
 	}
 	sockPath := filepath.Join(s.socketDir, socketdir.Format(socketdir.TypeAgent, target))
-	return s.deliverRequest(sockPath, target, &message.Request{
+	return s.deliverRequestWithTimeout(sockPath, target, &message.Request{
 		Type:     "send",
 		Priority: "normal",
 		From:     s.name,
 		Body:     text,
-	})
+	}, mirrorDeliverTimeout)
 }
 
 // Run starts all receiver bridges and the bridge socket listener.
@@ -533,15 +533,35 @@ func (s *Service) sendToAgent(name, from, body string) error {
 	return nil
 }
 
+// mirrorDeliverTimeout bounds a best-effort mirror delivery so a wedged
+// concierge cannot leak goroutines or hang Telegram.Close. Inbound
+// sendToAgent stays unbounded.
+var mirrorDeliverTimeout = 2 * time.Second
+
 // deliverRequest dials an agent socket and sends a single request, returning
 // the delivery error (if any). It performs no trigger bookkeeping, so it is
 // shared by both the inbound routing path and the passive outbound mirror.
 func (s *Service) deliverRequest(sockPath, name string, req *message.Request) error {
-	conn, err := net.Dial("unix", sockPath)
+	return s.deliverRequestWithTimeout(sockPath, name, req, 0)
+}
+
+func (s *Service) deliverRequestWithTimeout(sockPath, name string, req *message.Request, timeout time.Duration) error {
+	var d net.Dialer
+	deadline := time.Time{}
+	if timeout > 0 {
+		deadline = time.Now().Add(timeout)
+		d.Timeout = timeout
+	}
+	conn, err := d.Dial("unix", sockPath)
 	if err != nil {
 		return fmt.Errorf("connect to %s: %w", name, err)
 	}
 	defer conn.Close()
+	if !deadline.IsZero() {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return fmt.Errorf("set deadline: %w", err)
+		}
+	}
 
 	if err := message.SendRequest(conn, req); err != nil {
 		return fmt.Errorf("send request: %w", err)

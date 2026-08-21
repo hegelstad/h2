@@ -51,6 +51,34 @@ func TestSend(t *testing.T) {
 	}
 }
 
+func TestSend_EscapesAmpersandInsideTaggedHTML(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+	if err := tg.Send(context.Background(), "<b>ok</b> a & b"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if !strings.Contains(gotText, "<b>ok</b>") {
+		t.Errorf("lost bold tags: %q", gotText)
+	}
+	if strings.Contains(gotText, " & ") {
+		t.Errorf("raw ampersand survived: %q", gotText)
+	}
+	if !strings.Contains(gotText, "&amp;") {
+		t.Errorf("text %q missing &amp;", gotText)
+	}
+}
+
 func TestSend_EscapesUntaggedSpecials(t *testing.T) {
 	var gotText, gotMode string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -564,6 +592,24 @@ func TestWithReplyContext(t *testing.T) {
 			original: strings.Repeat("x", maxReplyQuoteRunes+100),
 			body:     "ok",
 			want:     "[in reply to]\n> " + strings.Repeat("x", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "non-ASCII runes truncated",
+			original: strings.Repeat("ä", maxReplyQuoteRunes+1),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("ä", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "emoji runes truncated",
+			original: strings.Repeat("🙂", maxReplyQuoteRunes+1),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("🙂", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "stacked h2 envelope then agent tag both stripped",
+			original: "[h2 message from: concierge] [researcher] here are the results",
+			body:     "what's the status?",
+			want:     "[in reply to]\n> here are the results\n\nwhat's the status?",
 		},
 	}
 	for _, tt := range tests {

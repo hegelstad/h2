@@ -341,6 +341,43 @@ func TestMirrorOutbound_DeliversToDynamicConcierge(t *testing.T) {
 	}
 }
 
+func TestMirrorOutbound_StuckPeerTimesOut(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	sockPath := filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "concierge"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	t.Cleanup(func() {
+		close(released)
+		_ = ln.Close()
+	})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-released
+	}()
+
+	old := mirrorDeliverTimeout
+	mirrorDeliverTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { mirrorDeliverTimeout = old })
+
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil, ServiceOpts{})
+	start := time.Now()
+	err = svc.mirrorOutbound("[telegram-out] hi")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout from stuck peer")
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("timeout took %s, want ~%s", elapsed, mirrorDeliverTimeout)
+	}
+}
+
 func TestMirrorOutbound_DisabledNoDelivery(t *testing.T) {
 	tmpDir := shortTempDir(t)
 	concierge := newMockAgent(t, tmpDir, "concierge")
