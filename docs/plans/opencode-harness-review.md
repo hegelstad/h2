@@ -1,13 +1,12 @@
-# Code Review: opencode harness oc1.1 (R1, grok-reviewer)
+# Code Review: opencode harness oc1.1+oc1.2 (R1, grok-reviewer)
 
-- Bead: oc1.1 (no bd id on branch)
-- Commit: `086b687` (`feat(harness): add hook-driven opencode package (oc1.1)`)
+- Bead: oc1.1 + oc1.2 (no bd id on branch)
+- Commit range: `086b687`..`8a57d95` (inclusive: oc1.1 package + oc1.2 `h2 auth opencode`)
 - Plan doc: `docs/plans/opencode-harness.md`
 - Reviewer: grok-reviewer
-- Review commit: (this file)
-- Scope: the 8 files under `internal/session/agent/harness/opencode/` at 086b687. Did not edit `coder-oc-h2`. Later commits on `feat/opencode-harness` (`8a57d95` oc1.2 auth, `4d8d9a7` oc1.3 session/handle-hook/roles wiring) are noted only when they already close a finding.
+- Scope: reviewed as a unit per concierge. Did not edit `coder-oc-h2`. oc1.3 (`4d8d9a7` session/handle-hook/roles) is noted only when it already closes a finding.
 
-Verified: `go test ./internal/session/agent/harness/opencode/` at 086b687 passes; `gofmt -l` clean; `go vet` clean. Probed installed opencode **1.18.21** (`opencode debug paths` / `debug config`) with the harness env.
+Verified: `go test ./internal/session/agent/harness/opencode/` and `go test ./internal/cmd/ -run 'Opencode|OpenRouter|AuthOpencode'` pass on this worktree. Probed installed opencode **1.18.21** (`opencode debug paths` / `debug config`).
 
 ## Findings
 
@@ -194,16 +193,79 @@ Optional: inject `H2_BIN` from `BuildCommandEnvVars` (`os.Executable()` or `look
 
 ---
 
-## Out of scope for 086b687 (already on `feat/opencode-harness`)
+### P1 - Interactive `opencode auth login` env appends without replacing existing `XDG_DATA_HOME` / `OPENCODE_CONFIG_DIR`
 
-These were plan §3/§11 items **not** in the 8-file commit. They are **not** defects of oc1.1, and oc1.3 already landed them:
+**Location:** `internal/cmd/auth_opencode.go` `opencodeAuthEnv`
+
+**Problem**
+The interactive path *does* intend to set both isolation vars (the concierge's checklist item):
+
+```go
+env := append(os.Environ(),
+    "OPENCODE_CONFIG_DIR="+cfgDir,
+    "XDG_DATA_HOME="+filepath.Join(cfgDir, "data"),
+)
+```
+
+PTY launch (`StartPTY`) **filters then overrides** existing keys. This path does not. Duplicate keys in `cmd.Env` are first-wins for libc `getenv` (glibc, and typically Bun). If the parent already has `XDG_DATA_HOME` (systemd user session, a wrapper, a leftover export), `opencode auth login` writes `auth.json` to the **parent** data dir (`~/.local/share/opencode/auth.json`), not `<cfg>/data/opencode/auth.json`.
+
+`TestOpencodeAuthEnv_PointsInsideConfigDir` walks the slice and keeps the **last** match, so it would pass in the duplicate-key case while the child uses the first. There is no test that `runOpencodeLogin` is invoked with a filtered env when no key is stashed.
+
+The non-interactive stash itself is correct (see "what oc1.2 got right" below).
+
+**Suggested fix**
+Reuse the `filteredEnv` pattern from `StartPTY` / `internal/session/daemon.go`: drop existing `OPENCODE_CONFIG_DIR`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, then set the isolated values (including config/state/cache — same P1 as the harness). Test: `t.Setenv("XDG_DATA_HOME", "/tmp/leaky")`, build env, assert **exactly one** `XDG_DATA_HOME=` and that it is `<cfg>/data`. Add `TestAuthOpencode_NoKey_InvokesLoginWithIsolatedEnv` that stubs `runOpencodeLogin` and inspects the env.
+
+---
+
+### P2 - `h2 auth opencode` with no flag still stashes and skips login if env/secrets have a key
+
+**Location:** `internal/cmd/auth_opencode.go` `runAuthOpencode`
+
+**Problem**
+Plan: flag selects the mode — bare `h2 auth opencode` → interactive `opencode auth login`; `--openrouter-key` → stash (and may read env/secrets). Implementation always `resolveOpenRouterKey(flag, secrets)` and if anything is found, stashes and **returns without login**. A host `OPENROUTER_API_KEY` or `~/h2home/.secrets.env` makes interactive zen/provider login unreachable. Documented in Long help, but it collapses the two modes.
+
+**Suggested fix**
+Only resolve env/secrets when `--openrouter-key` was actually passed (use `cmd.Flags().Changed("openrouter-key")`, allowing empty flag to mean "look up"). Bare `h2 auth opencode` always runs isolated login.
+
+---
+
+### P3 - Secrets path is hardcoded `~/h2home/.secrets.env`, not `H2_DIR`
+
+**Location:** `defaultSecretsPath`
+
+**Problem**
+Plan literally says `~/h2home/.secrets.env`, so this matches the machine. `config.ConfigDir()` / `H2_DIR` would survive a relocated data dir. `parseEnvFile` also does not strip quotes or `export ` prefixes.
+
+**Suggested fix**
+`filepath.Join(config.ConfigDir(), ".secrets.env")` with the documented path as fallback. Optional quote-strip.
+
+---
+
+## What oc1.2 got right (isolation checklist)
+
+| Check | Result |
+|---|---|
+| `--openrouter-key` stash path | `<config-dir>/openrouter.key` — the same dir the harness uses as `OPENCODE_CONFIG_DIR` (`HarnessConfigDir()` = prefix/`default`) |
+| stash mode 0600 | yes; `TestStashOpenRouterKey_IsolatedAndMode600` asserts `Perm()==0o600` |
+| stash not in `~/.config/opencode` | writes only under the provided cfg dir (tests use `t.TempDir()`) |
+| default dir | `<H2Dir>/opencode-config/default` — profile-scoped, same convention as `h2 auth claude` (not per-agent-name; shared key for the profile is intended) |
+| interactive sets `OPENCODE_CONFIG_DIR` **and** `XDG_DATA_HOME=<cfg>/data` | yes, the strings are right; merge is wrong (P1 above) |
+| mkdir data 0700 before login | yes |
+| non-interactive does not spawn login | yes (`TestAuthOpencode_OpenRouterKeyFlag_DoesNotInvokeLogin`) |
+| harness reads stash if env unset | yes (`TestBuildCommandEnvVars_ReadsStashedKeyFile`); process env wins over stash |
+
+---
+
+## Out of scope for 086b687..8a57d95 (already on `feat/opencode-harness` as oc1.3)
+
+These were plan §3/§11 items **not** in this range. oc1.3 already landed them:
 
 - Blank import `_ "…/harness/opencode"` in `session.go` + `resolve_test.go`.
 - `handle_hook.go --event` (plugin CLI would have failed cobra unknown-flag + required stdin `hook_event_name` on 086b687 alone; oc1.3 adds `--event` and allows empty stdin).
 - `agent_setup.go` prefix for `opencode` → `<H2Dir>/opencode-config`.
-- `h2 auth opencode` (oc1.2).
 
-oc1.4 signoff still needs the P1s in this package; wiring later beads does not close them (`pushState` and `BuildCommandEnvVars` are unchanged after oc1.3 except the stashed key file).
+oc1.4 signoff still needs the P1s; oc1.3 does not close them (`pushState` unchanged; `BuildCommandEnvVars` only gained the stash read; `opencodeAuthEnv` still appends).
 
 ## Plan / CLAUDE harness contract
 
@@ -222,7 +284,8 @@ oc1.4 signoff still needs the P1s in this package; wiring later beads does not c
 | Checksum-guarded config + plugin embed | yes |
 | `session.idle` → Idle | yes (lossy under full buffer) |
 | Plugin-failure ptycollector fallback (URP) | not in this bead |
-| `h2 auth opencode` / role yaml / blank import | later beads |
+| `h2 auth opencode` two modes | oc1.2: yes (stash 0600 + isolated login env, with P1 merge bug) |
+| role yaml / blank import | oc1.3 |
 
 ## Empirical notes (opencode 1.18.21)
 
@@ -232,12 +295,15 @@ oc1.4 signoff still needs the P1s in this package; wiring later beads does not c
 
 ## Summary
 
-5 findings to act on: **0 P0, 3 P1, 3 P2, 2 P3** (P2/P3 counts: 3 P2, 2 P3).
+**0 P0, 4 P1, 4 P2, 3 P3.**
 
 **Verdict**: **Approved with revisions**. Not clean for oc1.4 signoff until the P1s land:
 
-1. Set `XDG_CONFIG_HOME` (and state/cache) so isolation is actually airtight — `OPENCODE_CONFIG_DIR` + `XDG_DATA_HOME` is necessary and **not sufficient**.
-2. Make Idle non-lossy (Claude `emitTerminal` / coalesced latest-state); stop spawning handle-hook on every `message.updated`.
-3. Tests for (1) and (2), plus empty/malformed hook names. Happy-path isolation + transition tests are good and already green.
+1. Set `XDG_CONFIG_HOME` (and state/cache) on **both** the harness child and `opencodeAuthEnv` so isolation is airtight — `OPENCODE_CONFIG_DIR` + `XDG_DATA_HOME` is necessary and **not sufficient**.
+2. `opencodeAuthEnv` must **replace** existing `XDG_*` / `OPENCODE_CONFIG_DIR` (filter, don't append). Today a parent `XDG_DATA_HOME` sends interactive `auth.json` to the host path. Tests currently last-wins and would miss it.
+3. Make Idle non-lossy (Claude `emitTerminal` / coalesced latest-state); stop spawning handle-hook on every `message.updated`.
+4. Tests for (1)–(3), plus empty/malformed hook names. Happy-path isolation + 0600 stash + transition tests are good and already green.
 
-Unit tests at 086b687 are green (`go test ./internal/session/agent/harness/opencode/`). `make check` was not run on the full tree in this worktree (package `gofmt`/`vet` clean).
+oc1.2 stash path + 0600 + "sets both env vars" intent are correct. The remaining auth isolation hole is the env merge, not the stash location.
+
+Unit tests: `go test ./internal/session/agent/harness/opencode/` and `go test ./internal/cmd/ -run 'Opencode|OpenRouter|AuthOpencode'` green. `make check` was not run on the full tree.
