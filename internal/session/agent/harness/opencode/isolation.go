@@ -24,6 +24,40 @@ func IsolationEnv(cfgDir string) map[string]string {
 	}
 }
 
+// isolationEnvKeys are stripped from a parent environ before IsolationEnv is
+// applied so libc/Bun first-wins getenv cannot pick a leaky host XDG_*.
+var isolationEnvKeys = []string{
+	"OPENCODE_CONFIG_DIR",
+	"XDG_DATA_HOME",
+	"XDG_CONFIG_HOME",
+	"XDG_STATE_HOME",
+	"XDG_CACHE_HOME",
+}
+
+// ApplyIsolationEnv copies environ, drops existing isolation keys, then appends
+// IsolationEnv(cfgDir). Used by `h2 auth opencode` (interactive login). The
+// harness child path uses StartPTY's extraEnv filter instead.
+func ApplyIsolationEnv(environ []string, cfgDir string) []string {
+	drop := make(map[string]struct{}, len(isolationEnvKeys))
+	for _, k := range isolationEnvKeys {
+		drop[k] = struct{}{}
+	}
+	out := make([]string, 0, len(environ)+len(isolationEnvKeys))
+	for _, e := range environ {
+		k, _, ok := strings.Cut(e, "=")
+		if ok {
+			if _, skip := drop[k]; skip {
+				continue
+			}
+		}
+		out = append(out, e)
+	}
+	for k, v := range IsolationEnv(cfgDir) {
+		out = append(out, k+"="+v)
+	}
+	return out
+}
+
 func mkdirIsolation(cfgDir string, perm os.FileMode) error {
 	env := IsolationEnv(cfgDir)
 	if env == nil {

@@ -26,15 +26,18 @@ func newAuthOpencodeCmd() *cobra.Command {
 If no config-dir is provided, authenticates the default shared config:
   ~/.h2/opencode-config/default
 
-Two modes:
+Two modes (the flag selects the mode — a host OPENROUTER_API_KEY does not
+force stash on a bare invocation):
   h2 auth opencode
       Interactive: runs "opencode auth login" with OPENCODE_CONFIG_DIR and
-      XDG_DATA_HOME pointed at the config dir (creds stay isolated).
+      XDG_* isolated under the config dir (parent XDG_* are replaced, not
+      appended, so libc first-wins cannot leak to ~/.local/share/opencode).
 
   h2 auth opencode --openrouter-key <KEY>
+  h2 auth opencode --openrouter-key=
       Non-interactive Ox Alpha path. Stashes the key in the config dir so
-      OPENROUTER_API_KEY resolves. If the flag is empty, reads
-      OPENROUTER_API_KEY from the environment or ~/h2home/.secrets.env.`,
+      OPENROUTER_API_KEY resolves. If the flag is present but empty,
+      reads OPENROUTER_API_KEY from the environment or ~/h2home/.secrets.env.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runAuthOpencode(cmd, args, openRouterKey)
@@ -116,12 +119,16 @@ func stashOpenRouterKey(cfgDir, key string) error {
 }
 
 func opencodeAuthEnv(cfgDir, key string) []string {
-	env := os.Environ()
-	for k, v := range ocharness.IsolationEnv(cfgDir) {
-		env = append(env, k+"="+v)
-	}
+	env := ocharness.ApplyIsolationEnv(os.Environ(), cfgDir)
 	if key != "" {
-		env = append(env, "OPENROUTER_API_KEY="+key)
+		filtered := env[:0]
+		for _, e := range env {
+			if strings.HasPrefix(e, "OPENROUTER_API_KEY=") {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		env = append(filtered, "OPENROUTER_API_KEY="+key)
 	}
 	return env
 }
@@ -157,8 +164,11 @@ func runAuthOpencode(cmd *cobra.Command, args []string, flagKey string) error {
 		}
 	}
 
-	key := resolveOpenRouterKey(flagKey, defaultSecretsPath())
-	if key != "" {
+	if cmd.Flags().Changed("openrouter-key") {
+		key := resolveOpenRouterKey(flagKey, defaultSecretsPath())
+		if key == "" {
+			return fmt.Errorf("OPENROUTER_API_KEY not found (flag empty, env unset, secrets file missing)")
+		}
 		if err := stashOpenRouterKey(configDir, key); err != nil {
 			return fmt.Errorf("stash openrouter key: %w", err)
 		}

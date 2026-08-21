@@ -47,6 +47,9 @@ func TestStashOpenRouterKey_IsolatedAndMode600(t *testing.T) {
 }
 
 func TestOpencodeAuthEnv_PointsInsideConfigDir(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", "/tmp/leaky")
+	t.Setenv("XDG_CONFIG_HOME", "/tmp/leaky-cfg")
+	t.Setenv("OPENCODE_CONFIG_DIR", "/tmp/leaky-oc")
 	cfg := t.TempDir()
 	env := opencodeAuthEnv(cfg, "sk-test")
 	got := map[string]string{}
@@ -82,6 +85,89 @@ func TestOpencodeAuthEnv_PointsInsideConfigDir(t *testing.T) {
 	}
 	if got["OPENROUTER_API_KEY"] != "sk-test" {
 		t.Errorf("OPENROUTER_API_KEY = %q", got["OPENROUTER_API_KEY"])
+	}
+	counts := map[string]int{}
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if ok {
+			counts[k]++
+		}
+	}
+	for _, k := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR"} {
+		if counts[k] != 1 {
+			t.Errorf("%s count=%d want 1", k, counts[k])
+		}
+	}
+}
+
+func TestAuthOpencode_Bare_InvokesLoginWithIsolatedEnv(t *testing.T) {
+	called := false
+	var gotEnv []string
+	old := runOpencodeLogin
+	runOpencodeLogin = func(_ string, env []string) error {
+		called = true
+		gotEnv = append([]string(nil), env...)
+		return nil
+	}
+	t.Cleanup(func() { runOpencodeLogin = old })
+
+	t.Setenv("OPENROUTER_API_KEY", "should-not-stash")
+	t.Setenv("XDG_DATA_HOME", "/tmp/leaky")
+
+	cfg := t.TempDir()
+	cmd := newAuthOpencodeCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{cfg})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("bare h2 auth opencode must run isolated login, not stash")
+	}
+	n := 0
+	var data string
+	for _, e := range gotEnv {
+		if strings.HasPrefix(e, "XDG_DATA_HOME=") {
+			n++
+			data = strings.TrimPrefix(e, "XDG_DATA_HOME=")
+		}
+	}
+	if n != 1 {
+		t.Fatalf("XDG_DATA_HOME count=%d want 1", n)
+	}
+	if data != filepath.Join(cfg, "data") {
+		t.Errorf("XDG_DATA_HOME=%q, want isolated", data)
+	}
+}
+
+func TestAuthOpencode_OpenRouterKeyFlagEmpty_UsesEnv(t *testing.T) {
+	called := false
+	old := runOpencodeLogin
+	runOpencodeLogin = func(string, []string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { runOpencodeLogin = old })
+
+	t.Setenv("OPENROUTER_API_KEY", "from-env-empty-flag")
+	cfg := t.TempDir()
+	cmd := newAuthOpencodeCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{cfg, "--openrouter-key="})
+	if err := cmd.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("interactive login should not run when --openrouter-key is present")
+	}
+	body, err := os.ReadFile(filepath.Join(cfg, openRouterKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(body)) != "from-env-empty-flag" {
+		t.Errorf("stashed = %q", body)
 	}
 }
 
