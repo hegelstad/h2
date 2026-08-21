@@ -50,12 +50,13 @@ type Telegram struct {
 	// or fail the user-facing send; its error is logged and swallowed.
 	Mirror func(text string) error
 
-	client   http.Client
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	mirrorWG sync.WaitGroup
-	mu       sync.Mutex
-	offset   int64
+	client          http.Client
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	mirrorWG        sync.WaitGroup
+	mirrorsInFlight int32
+	mu              sync.Mutex
+	offset          int64
 
 	streamMu sync.Mutex
 }

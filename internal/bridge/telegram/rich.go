@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"h2/internal/bridge"
@@ -25,6 +26,23 @@ const (
 	mirrorTag = "[telegram-out] "
 )
 
+// maxInFlightMirrors caps concurrent mirror goroutines so a burst of
+// outbound sends cannot unbounded-park copies against a slow sink.
+// Extra copies are dropped (best-effort); Send never waits for a slot.
+var maxInFlightMirrors int32 = 32
+
+func (t *Telegram) tryAcquireMirrorSlot() bool {
+	for {
+		n := atomic.LoadInt32(&t.mirrorsInFlight)
+		if n >= maxInFlightMirrors {
+			return false
+		}
+		if atomic.CompareAndSwapInt32(&t.mirrorsInFlight, n, n+1) {
+			return true
+		}
+	}
+}
+
 // mirror enqueues a best-effort copy of a successfully-sent message to the
 // configured sink. It is fire-and-forget: the copy runs in its own goroutine
 // and any error (or panic) is logged, never propagated, so mirroring can
@@ -33,9 +51,14 @@ func (t *Telegram) mirror(text string) {
 	if t.Mirror == nil || text == "" {
 		return
 	}
+	if !t.tryAcquireMirrorSlot() {
+		log.Printf("telegram mirror: dropped copy (%d in flight)", maxInFlightMirrors)
+		return
+	}
 	t.mirrorWG.Add(1)
 	go func() {
 		defer t.mirrorWG.Done()
+		defer atomic.AddInt32(&t.mirrorsInFlight, -1)
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("telegram mirror: panic: %v", r)

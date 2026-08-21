@@ -378,6 +378,62 @@ func TestMirrorOutbound_StuckPeerTimesOut(t *testing.T) {
 	}
 }
 
+func TestSend_WedgedConciergeDoesNotBlockSendOrClose(t *testing.T) {
+	srv := okSendMessageServer(t)
+	tmpDir := shortTempDir(t)
+	sockPath := filepath.Join(tmpDir, socketdir.Format(socketdir.TypeAgent, "concierge"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	t.Cleanup(func() {
+		close(released)
+		_ = ln.Close()
+	})
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				<-released
+			}(conn)
+		}
+	}()
+
+	old := mirrorDeliverTimeout
+	mirrorDeliverTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { mirrorDeliverTimeout = old })
+
+	tg := &telegram.Telegram{Token: "TOKEN", ChatID: 1, BaseURL: srv.URL}
+	New([]bridge.Bridge{tg}, "alice", "concierge", "", tmpDir, nil, ServiceOpts{})
+
+	start := time.Now()
+	if err := tg.Send(context.Background(), "hello from h2"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Send blocked on wedged concierge for %s", elapsed)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- tg.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("Close took %s, want within mirror timeout", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Telegram.Close hung on wedged concierge")
+	}
+}
+
 func TestMirrorOutbound_DisabledNoDelivery(t *testing.T) {
 	tmpDir := shortTempDir(t)
 	concierge := newMockAgent(t, tmpDir, "concierge")

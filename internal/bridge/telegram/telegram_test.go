@@ -226,6 +226,43 @@ func TestSend_FailedSendDoesNotMirror(t *testing.T) {
 	}
 }
 
+func TestSend_DropsMirrorWhenInFlightCapHit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	old := maxInFlightMirrors
+	maxInFlightMirrors = 1
+	t.Cleanup(func() { maxInFlightMirrors = old })
+
+	release := make(chan struct{})
+	var calls atomic.Int32
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			calls.Add(1)
+			<-release
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "first"); err != nil {
+		t.Fatalf("Send first: %v", err)
+	}
+	if err := tg.Send(context.Background(), "second"); err != nil {
+		t.Fatalf("Send second: %v", err)
+	}
+	close(release)
+	tg.mirrorWG.Wait()
+
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("mirror calls = %d, want 1 (second copy dropped at cap)", n)
+	}
+}
+
 func TestSend_SlowMirrorDoesNotBlockSend(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
