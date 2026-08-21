@@ -49,28 +49,39 @@ func TestStashOpenRouterKey_IsolatedAndMode600(t *testing.T) {
 func TestOpencodeAuthEnv_PointsInsideConfigDir(t *testing.T) {
 	cfg := t.TempDir()
 	env := opencodeAuthEnv(cfg, "sk-test")
-	var gotCfg, gotData, gotKey string
+	got := map[string]string{}
 	for _, e := range env {
-		switch {
-		case strings.HasPrefix(e, "OPENCODE_CONFIG_DIR="):
-			gotCfg = strings.TrimPrefix(e, "OPENCODE_CONFIG_DIR=")
-		case strings.HasPrefix(e, "XDG_DATA_HOME="):
-			gotData = strings.TrimPrefix(e, "XDG_DATA_HOME=")
-		case strings.HasPrefix(e, "OPENROUTER_API_KEY="):
-			gotKey = strings.TrimPrefix(e, "OPENROUTER_API_KEY=")
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "OPENCODE_CONFIG_DIR", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "OPENROUTER_API_KEY":
+			got[k] = v
 		}
 	}
-	if gotCfg != cfg {
-		t.Errorf("OPENCODE_CONFIG_DIR = %q", gotCfg)
+	if got["OPENCODE_CONFIG_DIR"] != cfg {
+		t.Errorf("OPENCODE_CONFIG_DIR = %q", got["OPENCODE_CONFIG_DIR"])
 	}
-	if gotData != filepath.Join(cfg, "data") {
-		t.Errorf("XDG_DATA_HOME = %q", gotData)
+	if got["XDG_DATA_HOME"] != filepath.Join(cfg, "data") {
+		t.Errorf("XDG_DATA_HOME = %q", got["XDG_DATA_HOME"])
 	}
-	if !strings.HasPrefix(gotData, cfg) {
-		t.Errorf("data dir not isolated under config dir")
+	if got["XDG_CONFIG_HOME"] != filepath.Join(cfg, "xdg-config") {
+		t.Errorf("XDG_CONFIG_HOME = %q", got["XDG_CONFIG_HOME"])
 	}
-	if gotKey != "sk-test" {
-		t.Errorf("OPENROUTER_API_KEY = %q", gotKey)
+	if got["XDG_STATE_HOME"] != filepath.Join(cfg, "xdg-state") {
+		t.Errorf("XDG_STATE_HOME = %q", got["XDG_STATE_HOME"])
+	}
+	if got["XDG_CACHE_HOME"] != filepath.Join(cfg, "xdg-cache") {
+		t.Errorf("XDG_CACHE_HOME = %q", got["XDG_CACHE_HOME"])
+	}
+	for _, k := range []string{"XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"} {
+		if !strings.HasPrefix(got[k], cfg) {
+			t.Errorf("%s %q not under config dir", k, got[k])
+		}
+	}
+	if got["OPENROUTER_API_KEY"] != "sk-test" {
+		t.Errorf("OPENROUTER_API_KEY = %q", got["OPENROUTER_API_KEY"])
 	}
 }
 

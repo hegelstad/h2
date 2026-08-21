@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"h2/internal/config"
+	ocharness "h2/internal/session/agent/harness/opencode"
 )
 
 const openRouterKeyFile = "openrouter.key"
@@ -115,10 +116,10 @@ func stashOpenRouterKey(cfgDir, key string) error {
 }
 
 func opencodeAuthEnv(cfgDir, key string) []string {
-	env := append(os.Environ(),
-		"OPENCODE_CONFIG_DIR="+cfgDir,
-		"XDG_DATA_HOME="+filepath.Join(cfgDir, "data"),
-	)
+	env := os.Environ()
+	for k, v := range ocharness.IsolationEnv(cfgDir) {
+		env = append(env, k+"="+v)
+	}
 	if key != "" {
 		env = append(env, "OPENROUTER_API_KEY="+key)
 	}
@@ -147,8 +148,13 @@ func runAuthOpencode(cmd *cobra.Command, args []string, flagKey string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(configDir, "data"), 0o700); err != nil {
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("create opencode config dir: %w", err)
+	}
+	for _, d := range ocharness.IsolationEnv(configDir) {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return fmt.Errorf("create opencode isolation dir: %w", err)
+		}
 	}
 
 	key := resolveOpenRouterKey(flagKey, defaultSecretsPath())

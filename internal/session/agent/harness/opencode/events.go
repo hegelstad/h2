@@ -36,11 +36,22 @@ func (h *OpencodeHarness) HandleHookEvent(eventName string, payload json.RawMess
 }
 
 func (h *OpencodeHarness) pushState(state monitor.State, sub monitor.SubState) {
-	if h.stateCh == nil {
+	h.stateMu.Lock()
+	h.pending = &stateChange{state: state, sub: sub}
+	h.stateMu.Unlock()
+	if h.stateSig == nil {
 		return
 	}
 	select {
-	case h.stateCh <- stateChange{state: state, sub: sub}:
+	case h.stateSig <- struct{}{}:
 	default:
 	}
+}
+
+func (h *OpencodeHarness) takePending() *stateChange {
+	h.stateMu.Lock()
+	defer h.stateMu.Unlock()
+	p := h.pending
+	h.pending = nil
+	return p
 }

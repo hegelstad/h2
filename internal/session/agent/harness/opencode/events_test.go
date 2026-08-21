@@ -10,16 +10,63 @@ import (
 )
 
 func TestMapHookEvent(t *testing.T) {
-	idle, sub, ok := MapHookEvent("opencode.session.idle")
-	if !ok || idle != monitor.StateIdle || sub != monitor.SubStateNone {
-		t.Errorf("idle mapping = %v %v ok=%v", idle, sub, ok)
+	tests := []struct {
+		name    string
+		want    monitor.State
+		sub     monitor.SubState
+		handled bool
+	}{
+		{name: "opencode.session.idle", want: monitor.StateIdle, sub: monitor.SubStateNone, handled: true},
+		{name: "opencode.session.active", want: monitor.StateActive, sub: monitor.SubStateThinking, handled: true},
+		{name: "opencode.message.updated", want: monitor.StateActive, sub: monitor.SubStateThinking, handled: true},
+		{name: "opencode.permission.asked", want: monitor.StateActive, sub: monitor.SubStatePermissionReview, handled: true},
+		{name: "opencode.session.error", want: monitor.StateIdle, sub: monitor.SubStateServerError, handled: true},
+		{name: "", handled: false},
+		{name: "UserPromptSubmit", handled: false},
+		{name: "opencode.unknown", handled: false},
+		{name: "{not-json", handled: false},
 	}
-	active, _, ok := MapHookEvent("opencode.session.active")
-	if !ok || active != monitor.StateActive {
-		t.Errorf("active mapping = %v ok=%v", active, ok)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, sub, ok := MapHookEvent(tt.name)
+			if ok != tt.handled {
+				t.Fatalf("ok=%v want %v", ok, tt.handled)
+			}
+			if !tt.handled {
+				return
+			}
+			if got != tt.want || sub != tt.sub {
+				t.Errorf("got %v/%v want %v/%v", got, sub, tt.want, tt.sub)
+			}
+		})
 	}
-	if _, _, ok := MapHookEvent("UserPromptSubmit"); ok {
-		t.Error("claude hook names must not be claimed by opencode")
+}
+
+func TestHandleHookEvent_IdleNotDroppedWhenBufferFull(t *testing.T) {
+	h := New(isolatedRC(t), nil)
+	if _, err := h.PrepareForLaunch(true); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 40; i++ {
+		if !h.HandleHookEvent("opencode.session.active", json.RawMessage(`{}`)) {
+			t.Fatal("active not handled")
+		}
+	}
+	if !h.HandleHookEvent("opencode.session.idle", json.RawMessage(`{}`)) {
+		t.Fatal("idle not handled")
+	}
+
+	events := make(chan monitor.AgentEvent, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = h.Start(ctx, events) }()
+
+	got := collectState(t, events, 2, time.Second)
+	if got[0] != monitor.StateActive {
+		t.Fatalf("seed = %v, want Active", got[0])
+	}
+	if got[1] != monitor.StateIdle {
+		t.Fatalf("after flooded actives idle = %v, want Idle (idle was dropped)", got[1])
 	}
 }
 

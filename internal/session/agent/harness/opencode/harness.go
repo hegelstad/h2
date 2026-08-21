@@ -6,8 +6,10 @@ package opencode
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"h2/internal/activitylog"
@@ -39,7 +41,11 @@ type OpencodeHarness struct {
 	rc          *config.RuntimeConfig
 	activityLog *activitylog.Logger
 
-	stateCh     chan stateChange
+	// latest-state mailbox: a trailing Idle always wins even if hooks fire
+	// before Start or faster than the drain loop (lossy 32-deep queues drop it).
+	stateMu     sync.Mutex
+	pending     *stateChange
+	stateSig    chan struct{}
 	forceIdleCh chan struct{}
 }
 
@@ -51,7 +57,7 @@ func New(rc *config.RuntimeConfig, log *activitylog.Logger) *OpencodeHarness {
 	return &OpencodeHarness{
 		rc:          rc,
 		activityLog: log,
-		stateCh:     make(chan stateChange, 32),
+		stateSig:    make(chan struct{}, 1),
 		forceIdleCh: make(chan struct{}, 1),
 	}
 }
@@ -92,9 +98,9 @@ func (h *OpencodeHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	if h.rc != nil && h.rc.AgentName != "" {
 		env["H2_AGENT_NAME"] = h.rc.AgentName
 	}
-	if cfg != "" {
-		env["OPENCODE_CONFIG_DIR"] = cfg
-		env["XDG_DATA_HOME"] = h.dataDir()
+	env["H2_BIN"] = h2Bin()
+	for k, v := range IsolationEnv(cfg) {
+		env[k] = v
 	}
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
 		env["OPENROUTER_API_KEY"] = key
@@ -108,14 +114,24 @@ func (h *OpencodeHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	return env
 }
 
+func h2Bin() string {
+	if exe, err := os.Executable(); err == nil && exe != "" {
+		return exe
+	}
+	if p, err := exec.LookPath("h2"); err == nil {
+		return p
+	}
+	return "h2"
+}
+
 // PrepareForLaunch creates the force-idle channel (already allocated in New).
 func (h *OpencodeHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, error) {
 	_ = dryRun
 	if h.forceIdleCh == nil {
 		h.forceIdleCh = make(chan struct{}, 1)
 	}
-	if h.stateCh == nil {
-		h.stateCh = make(chan stateChange, 32)
+	if h.stateSig == nil {
+		h.stateSig = make(chan struct{}, 1)
 	}
 	return harness.LaunchConfig{}, nil
 }
@@ -147,8 +163,10 @@ func (h *OpencodeHarness) Start(ctx context.Context, events chan<- monitor.Agent
 			return nil
 		case <-h.forceIdleCh:
 			emit(monitor.StateIdle, monitor.SubStateNone)
-		case sc := <-h.stateCh:
-			emit(sc.state, sc.sub)
+		case <-h.stateSig:
+			if p := h.takePending(); p != nil {
+				emit(p.state, p.sub)
+			}
 		}
 	}
 }

@@ -3,11 +3,11 @@ package opencode
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"text/template"
 )
 
 const (
@@ -16,10 +16,6 @@ const (
 	configRelPath    = "opencode.json"
 	agentsRelPath    = "AGENTS.md"
 )
-
-type configTemplateData struct {
-	Model string
-}
 
 func (h *OpencodeHarness) configDir() string {
 	if h.rc == nil {
@@ -47,16 +43,13 @@ func (h *OpencodeHarness) resolvedModel() string {
 // harness config dir. Idempotent and checksum-guarded: a file the user
 // edited (content no longer matches the last h2-written checksum) is left
 // alone. Official template updates rewrite files we still own.
+//
+// An empty config dir fails closed — launching unisolated would leak into
+// ~/.config/opencode and ~/.local/share/opencode.
 func (h *OpencodeHarness) EnsureConfigDir(h2Dir string) error {
 	cfg := h.configDir()
-	if cfg == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Join(cfg, "plugins"), 0o755); err != nil {
-		return fmt.Errorf("opencode config dir: %w", err)
-	}
-	if err := os.MkdirAll(h.dataDir(), 0o755); err != nil {
-		return fmt.Errorf("opencode data dir: %w", err)
+	if err := mkdirIsolation(cfg, 0o700); err != nil {
+		return err
 	}
 
 	jsonBody, err := renderConfigJSON(h.resolvedModel())
@@ -89,15 +82,35 @@ func (h *OpencodeHarness) EnsureConfigDir(h2Dir string) error {
 }
 
 func renderConfigJSON(model string) ([]byte, error) {
-	tmpl, err := template.New("opencode.json").Parse(string(configJSONTemplate))
-	if err != nil {
-		return nil, fmt.Errorf("parse opencode.json template: %w", err)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = DefaultModel
 	}
-	var b strings.Builder
-	if err := tmpl.Execute(&b, configTemplateData{Model: model}); err != nil {
+	key := strings.TrimPrefix(model, "openrouter/")
+	cfg := map[string]any{
+		"$schema": "https://opencode.ai/config.json",
+		"model":   model,
+		"provider": map[string]any{
+			"openrouter": map[string]any{
+				"options": map[string]any{
+					"apiKey": "{env:OPENROUTER_API_KEY}",
+				},
+				"models": map[string]any{
+					key: map[string]any{
+						"limit": map[string]any{
+							"context": 200000,
+							"output":  65536,
+						},
+					},
+				},
+			},
+		},
+	}
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
 		return nil, fmt.Errorf("render opencode.json: %w", err)
 	}
-	return []byte(b.String()), nil
+	return append(b, '\n'), nil
 }
 
 func writeGuarded(root, rel string, content []byte) error {
@@ -109,18 +122,17 @@ func writeGuarded(root, rel string, content []byte) error {
 	if err == nil {
 		stored, _ := os.ReadFile(sumPath)
 		storedSum := strings.TrimSpace(string(stored))
-		if storedSum == "" {
-			// File exists without our checksum → treat as user-owned.
-			return nil
+		if storedSum != "" {
+			if sha256Hex(existing) != storedSum {
+				// User edited since we last wrote.
+				return nil
+			}
+			if storedSum == want {
+				return nil
+			}
+			// Template changed; we still own the file → rewrite.
 		}
-		if sha256Hex(existing) != storedSum {
-			// User edited since we last wrote.
-			return nil
-		}
-		if storedSum == want {
-			return nil
-		}
-		// Template changed; we still own the file → rewrite.
+		// No checksum: treat as an incomplete prior write, not user-owned.
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("stat %s: %w", path, err)
 	}
@@ -128,30 +140,47 @@ func writeGuarded(root, rel string, content []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(rel)+".*")
+	if err := writeFileAtomic(path, content, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", rel, err)
+	}
+	if err := writeFileAtomic(sumPath, []byte(want+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write checksum for %s: %w", rel, err)
+	}
+	return nil
+}
+
+func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
-		return fmt.Errorf("temp file for %s: %w", rel, err)
+		return err
 	}
 	tmpName := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
 	if _, err := tmp.Write(content); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		os.Remove(tmpName)
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
 		return err
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
 		return err
 	}
-	return os.WriteFile(sumPath, []byte(want+"\n"), 0o644)
+	cleanup = false
+	return nil
 }
 
 func sha256Hex(b []byte) string {
