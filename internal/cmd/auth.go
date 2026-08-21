@@ -18,6 +18,7 @@ func newAuthCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(newAuthClaudeCmd())
+	cmd.AddCommand(newAuthOpencodeCmd())
 	return cmd
 }
 

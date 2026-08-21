@@ -110,6 +110,22 @@ func TestBuildCommandEnvVars_IsolatesConfigAndData(t *testing.T) {
 	}
 }
 
+func TestBuildCommandEnvVars_ReadsStashedKeyFile(t *testing.T) {
+	rc := isolatedRC(t)
+	t.Setenv("OPENROUTER_API_KEY", "")
+	h := New(rc, nil)
+	if err := os.MkdirAll(h.configDir(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.configDir(), "openrouter.key"), []byte("sk-stashed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := h.BuildCommandEnvVars("")
+	if env["OPENROUTER_API_KEY"] != "sk-stashed" {
+		t.Errorf("OPENROUTER_API_KEY = %q, want sk-stashed", env["OPENROUTER_API_KEY"])
+	}
+}
+
 func TestEnsureConfigDir_WritesPluginAndJSON(t *testing.T) {
 	rc := isolatedRC(t)
 	h := New(rc, nil)

@@ -6,6 +6,8 @@ package opencode
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"h2/internal/activitylog"
@@ -96,6 +98,12 @@ func (h *OpencodeHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	}
 	if key := os.Getenv("OPENROUTER_API_KEY"); key != "" {
 		env["OPENROUTER_API_KEY"] = key
+	} else if cfg != "" {
+		if b, err := os.ReadFile(filepath.Join(cfg, "openrouter.key")); err == nil {
+			if k := strings.TrimSpace(string(b)); k != "" {
+				env["OPENROUTER_API_KEY"] = k
+			}
+		}
 	}
 	return env
 }
