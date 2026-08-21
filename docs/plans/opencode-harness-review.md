@@ -1,12 +1,12 @@
-# Code Review: opencode harness oc1.1+oc1.2 (R1, grok-reviewer)
+# Code Review: opencode harness oc1.1–oc1.3 (R1, grok-reviewer)
 
-- Bead: oc1.1 + oc1.2 (no bd id on branch)
-- Commit range: `086b687`..`8a57d95` (inclusive: oc1.1 package + oc1.2 `h2 auth opencode`)
+- Bead: oc1.1 + oc1.2 + oc1.3 (no bd id on branch)
+- Commit range: `086b687`..`4d8d9a7` (oc1.1 package + oc1.2 auth + oc1.3 wire-up)
 - Plan doc: `docs/plans/opencode-harness.md`
 - Reviewer: grok-reviewer
-- Scope: reviewed as a unit per concierge. Did not edit `coder-oc-h2`. oc1.3 (`4d8d9a7` session/handle-hook/roles) is noted only when it already closes a finding.
+- Scope: reviewed as a unit per concierge. Did not edit `coder-oc-h2` (grok-coder has uncommitted isolation work there; not in this range).
 
-Verified: `go test ./internal/session/agent/harness/opencode/` and `go test ./internal/cmd/ -run 'Opencode|OpenRouter|AuthOpencode'` pass on this worktree. Probed installed opencode **1.18.21** (`opencode debug paths` / `debug config`).
+Verified: at `4d8d9a7`, `go test ./internal/cmd/ -run 'HandleHook|Opencode|OpenRouter|AuthOpencode'`, `go test ./internal/session/agent/harness/ -run Resolve_Opencode`, `go test ./internal/config/ -run 'Opencode|LoadRoleFrom_Opencode'` pass. Probed opencode **1.18.21** for isolation (oc1.1 notes below).
 
 ## Findings
 
@@ -257,15 +257,87 @@ Plan literally says `~/h2home/.secrets.env`, so this matches the machine. `confi
 
 ---
 
-## Out of scope for 086b687..8a57d95 (already on `feat/opencode-harness` as oc1.3)
+## oc1.3 wire-up (`4d8d9a7`)
 
-These were plan §3/§11 items **not** in this range. oc1.3 already landed them:
+Shared files. This is the production-install gate.
 
-- Blank import `_ "…/harness/opencode"` in `session.go` + `resolve_test.go`.
-- `handle_hook.go --event` (plugin CLI would have failed cobra unknown-flag + required stdin `hook_event_name` on 086b687 alone; oc1.3 adds `--event` and allows empty stdin).
-- `agent_setup.go` prefix for `opencode` → `<H2Dir>/opencode-config`.
+### P0 - Installing `feat/opencode-harness` as the live fleet binary drops Grok
 
-oc1.4 signoff still needs the P1s; oc1.3 does not close them (`pushState` unchanged; `BuildCommandEnvVars` only gained the stash read; `opencodeAuthEnv` still appends).
+**Location:** `internal/session/session.go` import block; branch vs `origin/feat/grok-stop-hook` and `origin/deploy/combined`
+
+**Problem**
+Live `session.go` (deploy/combined and feat/grok-stop-hook) blank-imports `claude`, `codex`, `generic`, **`grok`**. This branch's `session.go` is `claude`, `codex`, `generic`, **`opencode`**. There is no `internal/session/agent/harness/grok` on `feat/opencode-harness` (`git cat-file` fatal). merge-base: grok-stop-hook is **not** an ancestor of this branch.
+
+The running fleet has grok-coder / grok-reviewer / grok-tg. `~/go/bin/h2` is a grok-capable build. A straight `go install` of this branch would make `harness.Resolve("grok")` fail (`unknown harness type`) and those agents would not relaunch.
+
+oc1.3's blank import of opencode **next to claude/codex/generic** is the right pattern *on this branch*. Merging into the live tip should keep grok **and** add opencode (import-block conflict, easy). Installing this tip *instead of* live is not.
+
+**Suggested fix**
+Do **not** install `feat/opencode-harness` over the live binary. Rebase/merge onto the grok-capable deploy tip so `session.go` has all five blank imports, then install. Confirm `harness.Resolve` for `grok` and `opencode` both work in that tree.
+
+---
+
+### handle_hook `--event` vs Claude JSON — clean branch, Claude path preserved
+
+**Location:** `internal/cmd/handle_hook.go`
+
+**What changed**
+- New `--event` flag. If set, that name is used and stdin is **not** required to be JSON.
+- If unset, previous Claude path: unmarshal stdin for `hook_event_name` (now skipped when stdin is empty/whitespace).
+- `sendHookEvent` / PreToolUse DCG / PermissionRequest still key off `eventName`. opencode names (`opencode.session.idle`) do not match those strings, so DCG/reviewer are not invoked.
+
+**Claude / grok safety**
+Claude settings.json is still `h2 handle-hook` with JSON on stdin, **no** `--event`. `TestHandleHook_SendsEventToAgent` still asserts `PreToolUse` + full payload forward + `{}` stdout. `TestHandleHook_DefaultsAgentFromH2Actor` covers `SessionStart` JSON. Invalid JSON still errors. Missing `hook_event_name` still errors (wording generalized; test updated to `strings.Contains`).
+
+Grok does not use handle-hook (returns false from `HandleHookEvent`). Unaffected by this file.
+
+`--event` overrides stdin `hook_event_name` if both are present. Claude never passes the flag. Plugin uses `--event` + empty stdin (`TestHandleHook_EventFlag_OpencodeIdle`).
+
+**Not a finding.** This is the right generalization. Payload for `--event` with empty stdin is `[]byte("")`; opencode `HandleHookEvent` ignores payload. Fine.
+
+---
+
+### Blank import registration — correct on this branch
+
+**Location:** `internal/session/session.go`, `internal/session/agent/harness/resolve_test.go`
+
+`init()` in `opencode` registers `Names: []string{"opencode", "opencode_ai"}`, `DefaultCommand: "opencode"`. Blank-import next to the other harnesses is how Resolve finds it. `h2 run` → `agent_setup` imports `session` → init runs. `TestResolve_Opencode` covers canonical name and `opencode_ai` alias.
+
+`Resolve`'s error string still says `supported: claude_code, codex, generic` (P3 stale text, not a runtime bug).
+
+---
+
+### P1 - First `h2 run --role opencode-coder` fails unless `opencode-config/default` already exists
+
+**Location:** `internal/cmd/agent_setup.go` `validateHarnessConfigDirExists` vs `EnsureConfigDir`; `init.go` (no `opencode-config` scaffold)
+
+**Problem**
+`buildRoleRuntimeConfig` now sets prefix `<H2Dir>/opencode-config` (good — without this, isolation env would be empty). Then `validateHarnessConfigDirExists` **stats** `prefix/profile` and, if missing, errors:
+
+```
+profile "default" not found (missing …/opencode-config/default); … use 'h2 profile create default'
+```
+
+`EnsureConfigDir` (which `MkdirAll`s config + data + plugin) is only called **after** that check. `h2 init` scaffolds `claude-config/default` only. `h2 profile create` is Claude/codex-shaped and does not create `opencode-config`. The dir is created by `h2 auth opencode` (`MkdirAll`).
+
+So the documented sequence `h2 auth opencode` then `h2 run` works. `h2 run` first does not, and the error points at the wrong command. Existing Claude agents are unchanged (their dirs already exist).
+
+**Suggested fix**
+Either: skip the exists-check for opencode and let `EnsureConfigDir` create the tree; or scaffold `opencode-config/default` in `h2 init` / `h2 auth`; and fix the error string to recommend `h2 auth opencode`.
+
+Hardcoded prefix (no `GetOpencodeConfigPathPrefix` like Claude/Codex) is a P2 consistency nit — no role-level override.
+
+---
+
+### Role template
+
+`ValidHarnessTypes` includes `opencode` / `opencode_ai`. `TestGetHarnessType_Opencode` + `TestLoadRoleFrom_OpencodeCoder`. Opinionated template `opencode-coder.yaml.tmpl` (`agent_harness: opencode`, Ox Alpha model, instructions only — AGENTS.md path). Embedded via `//go:embed templates/**`, so `h2 role` can instantiate it. Not in the minimal style (same as concierge.yaml). Fine.
+
+`system_prompt` is catalogued as claude-only in `role_warnings.go`; the template correctly uses `instructions` only.
+
+---
+
+oc1.3 does **not** close the oc1.1/oc1.2 P1s (`pushState` still drops Idle; `BuildCommandEnvVars` / `opencodeAuthEnv` still missing XDG_CONFIG/STATE/CACHE and still append-not-replace). grok-coder has uncommitted `isolation.go` on `coder-oc-h2` — not reviewed here.
 
 ## Plan / CLAUDE harness contract
 
@@ -285,7 +357,7 @@ oc1.4 signoff still needs the P1s; oc1.3 does not close them (`pushState` unchan
 | `session.idle` → Idle | yes (lossy under full buffer) |
 | Plugin-failure ptycollector fallback (URP) | not in this bead |
 | `h2 auth opencode` two modes | oc1.2: yes (stash 0600 + isolated login env, with P1 merge bug) |
-| role yaml / blank import | oc1.3 |
+| role yaml / blank import / handle-hook `--event` / prefix | oc1.3: yes (see wire-up section) |
 
 ## Empirical notes (opencode 1.18.21)
 
@@ -295,15 +367,20 @@ oc1.4 signoff still needs the P1s; oc1.3 does not close them (`pushState` unchan
 
 ## Summary
 
-**0 P0, 4 P1, 4 P2, 3 P3.**
+**1 P0 (install), 5 P1, 4 P2, 3 P3.**
 
-**Verdict**: **Approved with revisions**. Not clean for oc1.4 signoff until the P1s land:
+**Verdict**: **Not clean for a live-fleet install.** Wire-up of handle-hook / blank import / role **is correct on this branch**. Approved with revisions for the opencode feature itself.
 
-1. Set `XDG_CONFIG_HOME` (and state/cache) on **both** the harness child and `opencodeAuthEnv` so isolation is airtight — `OPENCODE_CONFIG_DIR` + `XDG_DATA_HOME` is necessary and **not sufficient**.
-2. `opencodeAuthEnv` must **replace** existing `XDG_*` / `OPENCODE_CONFIG_DIR` (filter, don't append). Today a parent `XDG_DATA_HOME` sends interactive `auth.json` to the host path. Tests currently last-wins and would miss it.
-3. Make Idle non-lossy (Claude `emitTerminal` / coalesced latest-state); stop spawning handle-hook on every `message.updated`.
-4. Tests for (1)–(3), plus empty/malformed hook names. Happy-path isolation + 0600 stash + transition tests are good and already green.
+**oc1.3 wire-up (the shared files):**
+- `--event` is an additive branch. Claude JSON-on-stdin path is unchanged in behavior; existing handle-hook tests still pass. DCG / PermissionRequest only fire on those Claude event names.
+- Blank import of `opencode` is the right registration. `opencode` and `opencode_ai` resolve.
+- **Do not `go install` this branch over the live binary.** It has no grok harness; live `session.go` does. Merge onto the grok-capable tip first (P0).
+- First opencode launch needs `opencode-config/default` already on disk (`h2 auth opencode`); `h2 run` alone errors with a misleading `h2 profile create` hint (P1).
 
-oc1.2 stash path + 0600 + "sets both env vars" intent are correct. The remaining auth isolation hole is the env merge, not the stash location.
+**Still blocking oc1.4 signoff from oc1.1/oc1.2:**
+1. `XDG_CONFIG_HOME` / `STATE` / `CACHE` unset — Path.config stays `~/.config/opencode`.
+2. `opencodeAuthEnv` appends instead of replacing parent `XDG_*`.
+3. Idle is droppable (`pushState` non-blocking); plugin hooks `message.updated`.
+4. Tests for those paths.
 
-Unit tests: `go test ./internal/session/agent/harness/opencode/` and `go test ./internal/cmd/ -run 'Opencode|OpenRouter|AuthOpencode'` green. `make check` was not run on the full tree.
+Handle-hook tests + Resolve_Opencode + role load tests green at `4d8d9a7`. `make check` not run on the full tree.
