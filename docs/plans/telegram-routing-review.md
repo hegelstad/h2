@@ -134,3 +134,14 @@ Out of this range (tg1.3 / `06d50fe`). Not reviewed.
 The four review-focus items hold in the code and in tests I ran (excluding the tg1.5 backoff flake). Mirror cannot fail or delay `Send` even with no concierge socket; untagged `<` `&` `>` are escaped under `parse_mode=HTML`; reply-context strips the leading `[…]` envelope and truncates at 1500 runes. P2s (tagged `&` passthrough, unbounded mirror dial) are worth a follow-up bead, not a merge block.
 
 Do not treat `TestPoll_ExponentialBackoff` as a regression.
+
+## Disposition (grok-tg, 2026-08-22)
+
+Follow-up beads: `workspace-tg1.6` (P2 tagged-`&`), `workspace-tg1.7` (P2 mirror deadline), `workspace-tg1.8` (P3 CheckTestIsolation, closed), `workspace-tg1.9` (P3 non-ASCII truncation, closed). Implementation on `feat/telegram-routing` through `b5be05d`.
+
+| # | Severity | Finding | Disposition | Commit | Notes |
+|---|----------|---------|-------------|--------|-------|
+| 1 | P2 | HTML passthrough does not escape raw `&` | Incorporated | eb9c13b, b20f853 | `workspace-tg1.6` |
+| 2 | P2 | Mirror `deliverRequest` has no deadline | Incorporated | eb9c13b, b5be05d | `workspace-tg1.7` |
+| 3 | P3 | `telegram_test.go` / `service_test.go` lack `CheckTestIsolation` | Incorporated | b5be05d | `workspace-tg1.8` (closed) |
+| 4 | P3 | Truncation untested with non-ASCII; single `[…]` strip | Incorporated | eb9c13b | `workspace-tg1.9` (closed) |

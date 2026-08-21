@@ -2,7 +2,7 @@
 
 Status: DRAFT (planning) — 2026-08-21
 Owner: concierge → scheduler (execution)
-Related: `internal/bridge/telegram/{telegram.go,rich.go}`, `~/h2home/bin/*` sender scripts
+Related: `internal/bridge/telegram/{telegram.go,rich.go}`, `~/h2home/bin/*` sender scripts, R1 review `docs/plans/telegram-routing-review.md`
 Requested by user (2026-08-21), three asks:
 1. All notification scripts render **formatted** (user confirmed **HTML / format "B"** is the one that renders).
 2. All outbound to the Telegram chat should **go through concierge**, so concierge knows what the user has received in their chat.
