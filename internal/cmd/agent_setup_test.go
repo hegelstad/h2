@@ -44,6 +44,25 @@ func TestValidateHarnessConfigDirExists_ExistingProfileDerivedDir(t *testing.T) 
 	}
 }
 
+func TestValidateHarnessConfigDirExists_OpencodeMissingDirOK(t *testing.T) {
+	h2Dir := setupProfileTestH2Dir(t)
+	role := &config.Role{
+		AgentHarness: "opencode",
+		Profile:      "default",
+	}
+	rc := buildRoleRuntimeConfig(role)
+	if !strings.Contains(rc.HarnessConfigPathPrefix, "opencode-config") {
+		t.Fatalf("prefix = %q", rc.HarnessConfigPathPrefix)
+	}
+	missing := filepath.Join(h2Dir, "opencode-config", "default")
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s should not exist, stat err=%v", missing, err)
+	}
+	if err := validateHarnessConfigDirExists(role, rc); err != nil {
+		t.Fatalf("opencode must not require a pre-existing config dir: %v", err)
+	}
+}
+
 func TestDoSetupAndForkAgent_FailsWhenProfileMissing(t *testing.T) {
 	setupProfileTestH2Dir(t)
 	role := &config.Role{

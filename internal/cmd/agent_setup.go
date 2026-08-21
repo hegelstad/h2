@@ -268,6 +268,15 @@ func heartbeatIntervalFromDuration(durStr string) string {
 }
 
 func validateHarnessConfigDirExists(role *config.Role, rc *config.RuntimeConfig) error {
+	if rc != nil {
+		switch harness.CanonicalName(rc.HarnessType) {
+		case "opencode", "opencode_ai":
+			// EnsureConfigDir creates opencode-config/<profile> on first
+			// launch. Requiring the dir here made `h2 run --role opencode-coder`
+			// fail with a misleading `h2 profile create` hint.
+			return nil
+		}
+	}
 	configDir := rc.HarnessConfigDir()
 	if configDir == "" {
 		return nil
