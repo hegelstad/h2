@@ -177,6 +177,8 @@ var ValidHarnessTypes = []string{
 	"claude_code",
 	"codex",
 	"generic",
+	"opencode",
+	"opencode_ai",
 }
 
 // PermissionReview configures permission handling strategies.

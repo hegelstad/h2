@@ -1544,6 +1544,30 @@ func TestGetHarnessType_ExplicitConfig(t *testing.T) {
 	}
 }
 
+func TestGetHarnessType_Opencode(t *testing.T) {
+	role := &Role{RoleName: "opencode-coder", AgentHarness: "opencode"}
+	if err := role.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := role.GetHarnessType(); got != "opencode" {
+		t.Errorf("GetHarnessType() = %q, want opencode", got)
+	}
+}
+
+func TestLoadRoleFrom_OpencodeCoder(t *testing.T) {
+	path := filepath.Join("testdata", "roles", "opencode-coder.yaml")
+	role, err := LoadRoleFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role.GetHarnessType() != "opencode" {
+		t.Errorf("harness = %q", role.GetHarnessType())
+	}
+	if role.GetModel() != "openrouter/stealth/ox-alpha" {
+		t.Errorf("model = %q", role.GetModel())
+	}
+}
+
 func TestGetAgentType_MapsClaudeCodeToClaude(t *testing.T) {
 	role := &Role{RoleName: "test", AgentHarness: "claude_code"}
 	if got := role.GetAgentType(); got != "" {

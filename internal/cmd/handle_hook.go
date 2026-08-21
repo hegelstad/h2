@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,19 +21,20 @@ import (
 
 func newHandleHookCmd() *cobra.Command {
 	var agentName string
+	var eventFlag string
 	var forcedPermissionResult string
 	var delaySeconds float64
 	var delayPermissionRequestSeconds float64
 
 	cmd := &cobra.Command{
 		Use:   "handle-hook",
-		Short: "Handle a Claude Code hook event",
-		Long: `Reads a Claude Code hook JSON payload from stdin, forwards the event
-to the agent's h2 session, and optionally handles PermissionRequest events
-with an AI reviewer.
+		Short: "Handle a harness hook event (Claude Code or opencode)",
+		Long: `Forwards a hook event to the agent's h2 session.
 
-Designed to be registered as the hook command for all Claude Code hook events
-in settings.json. Exits 0 with JSON on stdout.`,
+Claude Code: reads a JSON payload from stdin with hook_event_name.
+opencode: pass --event opencode.session.idle (stdin may be empty).
+
+Exits 0 with JSON on stdout.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -48,15 +50,20 @@ in settings.json. Exits 0 with JSON on stdout.`,
 				return fmt.Errorf("read stdin: %w", err)
 			}
 
-			// Extract hook_event_name from the JSON payload.
-			var envelope struct {
-				HookEventName string `json:"hook_event_name"`
+			eventName := eventFlag
+			if eventName == "" {
+				var envelope struct {
+					HookEventName string `json:"hook_event_name"`
+				}
+				if len(bytes.TrimSpace(data)) > 0 {
+					if err := json.Unmarshal(data, &envelope); err != nil {
+						return fmt.Errorf("parse hook JSON: %w", err)
+					}
+				}
+				eventName = envelope.HookEventName
 			}
-			if err := json.Unmarshal(data, &envelope); err != nil {
-				return fmt.Errorf("parse hook JSON: %w", err)
-			}
-			if envelope.HookEventName == "" {
-				return fmt.Errorf("hook_event_name not found in payload")
+			if eventName == "" {
+				return fmt.Errorf("hook event name not found (pass --event or hook_event_name in JSON)")
 			}
 			if forcedPermissionResult != "" && !isValidForcedPermissionResult(forcedPermissionResult) {
 				return fmt.Errorf("--force-permission-request-result must be one of: deny, allow, ask_user")
@@ -72,7 +79,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 1: Always forward the hook event to the agent.
-			sendHookEvent(agentName, envelope.HookEventName, data)
+			sendHookEvent(agentName, eventName, data)
 
 			// Load permission review config and role from session metadata.
 			sessionDir := config.FindSessionDirByAgentName(agentName)
@@ -86,7 +93,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 2: For PreToolUse, optionally run DCG.
-			if envelope.HookEventName == "PreToolUse" {
+			if eventName == "PreToolUse" {
 				if prConfig != nil && prConfig.DCG != nil && prConfig.DCG.IsEnabled() {
 					return handleDCGPreToolUse(cmd, agentName, roleName, prConfig.DCG, data)
 				}
@@ -95,7 +102,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 			}
 
 			// Step 3: For PermissionRequest, optionally run the permission reviewer.
-			if envelope.HookEventName == "PermissionRequest" {
+			if eventName == "PermissionRequest" {
 				if delayPermissionRequestSeconds > 0 {
 					time.Sleep(time.Duration(delayPermissionRequestSeconds * float64(time.Second)))
 				}
@@ -113,6 +120,7 @@ in settings.json. Exits 0 with JSON on stdout.`,
 	}
 
 	cmd.Flags().StringVar(&agentName, "agent", "", "Agent name (defaults to $H2_ACTOR)")
+	cmd.Flags().StringVar(&eventFlag, "event", "", "Hook event name (overrides stdin hook_event_name; used by opencode plugins)")
 	cmd.Flags().StringVar(&forcedPermissionResult, "force-permission-request-result", "", "Force PermissionRequest result: deny, allow, or ask_user (only applies to PermissionRequest hooks)")
 	cmd.Flags().Float64Var(&delaySeconds, "delay-seconds", 0, "Testing helper: delay before forwarding hook and starting any PermissionRequest handling")
 	cmd.Flags().Float64Var(&delayPermissionRequestSeconds, "delay-permission-request-seconds", 0, "Testing helper: for PermissionRequest only, delay before decision handling (after forwarding the hook event)")

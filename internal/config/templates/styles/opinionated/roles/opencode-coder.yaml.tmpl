@@ -1,0 +1,15 @@
+role_name: opencode-coder
+description: "A coding agent on the opencode harness (Ox Alpha via OpenRouter by default)"
+
+agent_harness: opencode
+agent_model: openrouter/stealth/ox-alpha
+profile: "default"
+
+# System prompt is delivered via AGENTS.md in the harness config dir
+# (opencode has no --system-prompt flag).
+instructions: |
+  You are a coder agent. Write clean, tested code. Prefer TDD.
+  Commit your changes after completing a chunk of work.
+  Do not guess missing requirements — ask.
+
+working_dir: "."

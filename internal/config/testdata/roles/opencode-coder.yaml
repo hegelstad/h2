@@ -1,0 +1,6 @@
+role_name: opencode-coder
+description: "opencode harness coder (Ox Alpha)"
+agent_harness: opencode
+agent_model: openrouter/stealth/ox-alpha
+instructions: |
+  You are a coder agent.

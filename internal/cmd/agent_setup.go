@@ -33,6 +33,8 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetClaudeConfigPathPrefix()
 	case "codex":
 		harnessConfigPathPrefix = role.GetCodexConfigPathPrefix()
+	case "opencode", "opencode_ai":
+		harnessConfigPathPrefix = filepath.Join(config.ConfigDir(), "opencode-config")
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,
@@ -56,6 +58,9 @@ func buildCommandRuntimeConfig(command string) *config.RuntimeConfig {
 	case "codex":
 		ht = "codex"
 		configPrefix = filepath.Join(config.ConfigDir(), "codex-config")
+	case "opencode":
+		ht = "opencode"
+		configPrefix = filepath.Join(config.ConfigDir(), "opencode-config")
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,

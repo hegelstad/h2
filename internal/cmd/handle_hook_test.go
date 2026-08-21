@@ -155,6 +155,30 @@ func TestHandleHook_SendsEventToAgent(t *testing.T) {
 	}
 }
 
+func TestHandleHook_EventFlag_OpencodeIdle(t *testing.T) {
+	tmpDir := shortHookTempDir(t)
+	agent := setupMockAgent(t, tmpDir, "oc-agent")
+
+	cmd := newHandleHookCmd()
+	cmd.SetArgs([]string{"--agent", "oc-agent", "--event", "opencode.session.idle"})
+	cmd.SetIn(bytes.NewBufferString(""))
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	reqs := agent.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	if reqs[0].EventName != "opencode.session.idle" {
+		t.Errorf("event = %q", reqs[0].EventName)
+	}
+	if stdout.String() != "{}\n" {
+		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
 func TestHandleHook_DefaultsAgentFromH2Actor(t *testing.T) {
 	tmpDir := shortHookTempDir(t)
 	agent := setupMockAgent(t, tmpDir, "concierge")
@@ -206,7 +230,7 @@ func TestHandleHook_ErrorNoEventName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when hook_event_name missing")
 	}
-	if err.Error() != "hook_event_name not found in payload" {
+	if !strings.Contains(err.Error(), "hook event name not found") {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }

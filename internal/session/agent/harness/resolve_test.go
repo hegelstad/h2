@@ -10,6 +10,7 @@ import (
 	_ "h2/internal/session/agent/harness/claude"
 	_ "h2/internal/session/agent/harness/codex"
 	_ "h2/internal/session/agent/harness/generic"
+	_ "h2/internal/session/agent/harness/opencode"
 )
 
 func TestResolve_ClaudeCode(t *testing.T) {
@@ -123,5 +124,25 @@ func TestResolve_ClaudeCode_ConfigPassthrough(t *testing.T) {
 	envVars := h.BuildCommandEnvVars("/unused")
 	if envVars["CLAUDE_CONFIG_DIR"] != "/tmp/test/config" {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want %q", envVars["CLAUDE_CONFIG_DIR"], "/tmp/test/config")
+	}
+}
+
+func TestResolve_Opencode(t *testing.T) {
+	h, err := harness.Resolve(&config.RuntimeConfig{HarnessType: "opencode", Model: "openrouter/stealth/ox-alpha"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if h.Name() != "opencode" {
+		t.Errorf("Name() = %q, want opencode", h.Name())
+	}
+	if h.Command() != "opencode" {
+		t.Errorf("Command() = %q", h.Command())
+	}
+	alias, err := harness.Resolve(&config.RuntimeConfig{HarnessType: "opencode_ai"}, nil)
+	if err != nil {
+		t.Fatalf("alias: %v", err)
+	}
+	if alias.Name() != "opencode" {
+		t.Errorf("opencode_ai Name() = %q", alias.Name())
 	}
 }
