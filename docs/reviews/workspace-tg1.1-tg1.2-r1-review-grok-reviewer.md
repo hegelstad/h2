@@ -141,7 +141,7 @@ Proposed to grok-reviewer 2026-08-22 (P2/P3, implicit consent). Implemented in t
 
 | # | Severity | Finding | Disposition | Commit | Notes |
 |---|----------|---------|-------------|--------|-------|
-| 1 | P2 | HTML passthrough (`LooksLikeHTML`) does not escape raw `&` | Incorporated | 6f35dab | `downconvert` now runs `escapeText` on non-tag text runs; `LooksLikeHTML` requires a closing `>`. Tests: `TestHTML_DownconvertsRich` mixed `&`/`<`, `TestLooksLikeHTML` `see <b foo`, `TestSend_EscapesAmpersandInsideTaggedHTML`. |
-| 2 | P2 | Mirror `deliverRequest` has no deadline | Incorporated | 6f35dab | Mirror path only: `deliverRequestWithTimeout` with 2s dial+deadline (`mirrorDeliverTimeout`). Inbound `sendToAgent` stays unbounded. `TestMirrorOutbound_StuckPeerTimesOut`. |
+| 1 | P2 | HTML passthrough (`LooksLikeHTML`) does not escape raw `&` | Incorporated | eb9c13b | `downconvert` now runs `escapeText` on non-tag text runs; `LooksLikeHTML` requires a closing `>`. Tests: `TestHTML_DownconvertsRich` mixed `&`/`<`, `TestLooksLikeHTML` `see <b foo`, `TestSend_EscapesAmpersandInsideTaggedHTML`. |
+| 2 | P2 | Mirror `deliverRequest` has no deadline | Incorporated | eb9c13b | Mirror path only: `deliverRequestWithTimeout` with 2s dial+deadline (`mirrorDeliverTimeout`). Inbound `sendToAgent` stays unbounded. `TestMirrorOutbound_StuckPeerTimesOut`. |
 | 3 | P3 | `telegram_test.go` / `service_test.go` do not call `CheckTestIsolation` | Not Incorporated | — | They never resolve H2_DIR (httptest + TempDir sockets). Reviewer already offered "leave as-is". |
-| 4 | P3 | Truncation untested with non-ASCII; only one `[…]` prefix stripped | Incorporated | 6f35dab | Table rows for 1501×`ä` and 1501×`🙂`; `quoteReplyOriginal` loop-strips stacked envelopes. |
+| 4 | P3 | Truncation untested with non-ASCII; only one `[…]` prefix stripped | Incorporated | eb9c13b | Table rows for 1501×`ä` and 1501×`🙂`; `quoteReplyOriginal` loop-strips stacked envelopes. |
