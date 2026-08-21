@@ -384,3 +384,36 @@ oc1.3 does **not** close the oc1.1/oc1.2 P1s (`pushState` still drops Idle; `Bui
 4. Tests for those paths.
 
 Handle-hook tests + Resolve_Opencode + role load tests green at `4d8d9a7`. `make check` not run on the full tree.
+
+---
+
+# R2 confirmation (oc1.1 P1s + oc1.2 auth env-merge)
+
+- Range: `a934c55` + `4992c22` on `origin/feat/opencode-harness` (tip `4992c22`)
+- Reviewer: grok-reviewer
+- Tests at `4992c22`: `go test ./internal/session/agent/harness/opencode/` and `./internal/cmd/ -run 'Opencode|OpenRouter|AuthOpencode|HandleHook_EventFlag|…'` ok
+
+## Disposition check
+
+| R1 finding | Disposition | Landed at 4992c22? |
+|---|---|---|
+| P1 XDG_CONFIG/STATE/CACHE + fail-closed empty cfg | Incorporate | **Yes.** `IsolationEnv` sets all four + `OPENCODE_CONFIG_DIR`. `mkdirIsolation` fail-closed. Tests capture `hostHome` in `TestMain` before mutating HOME; empty prefix test. |
+| P1 Idle droppable / `message.updated` flood | Incorporate | **Yes.** Latest-state mailbox + 1-slot `stateSig`. Plugin no longer hooks `message.updated`. `TestHandleHookEvent_IdleNotDroppedWhenBufferFull` (40 actives then idle before Start). |
+| P1 tests for isolation + idle-loss | Incorporate | **Yes.** See harness_test.go / events_test.go / isolation_test.go. |
+| P1 oc1.2 `opencodeAuthEnv` append first-wins | Incorporate | **Yes.** `ApplyIsolationEnv` strips parent keys then sets isolated values. Bare `h2 auth opencode` is interactive even if env has a key; `--openrouter-key=` selects stash. Exactly-one `XDG_DATA_HOME` test with leaky parent. |
+| P2 plugin names / try-catch / empty agent | Incorporate | **Yes.** `opencode.permission.asked`; try/catch; skip if `H2_AGENT_NAME` empty. |
+| P2 checksum crash window | Incorporate | **Yes.** Missing checksum → rewrite; `writeFileAtomic` for content and sidecar. |
+| P2 profile-scoped AGENTS.md/sqlite | Deferred oc1.5 | **Still deferred.** Disposition mentions `workspace-oc1.5`; no bead file found on this tip — please create it. |
+| P3 JSON-escaped model / per-model limits | Incorporate | **Yes.** `encoding/json`; limits keyed by `TrimPrefix(model, "openrouter/")`. |
+| P3 `H2_BIN` | Incorporate | **Yes.** `os.Executable()` / `LookPath`. |
+
+No new P0/P1 in the incorporated oc1.1/oc1.2 code.
+
+## Still blocking a live-fleet install (not this R2 of oc1.1)
+
+1. **P0 grok:** `origin/feat/opencode-harness` still has no `harness/grok`. `session.go` blank-imports opencode, not grok. coder-oc-h2 looks mid-merge (UU `session.go`, `handle_hook.go`, `agent_setup.go`, `auth.go`) — finish that merge before install.
+2. **P1 first-run:** `validateHarnessConfigDirExists` still runs *before* `EnsureConfigDir` and errors if `opencode-config/default` is missing, pointing at `h2 profile create`. `h2 auth opencode` creates the dir; `h2 run` alone still does not.
+
+**R2 verdict (oc1.1 + oc1.2 auth P1s):** **Approved.**
+
+**Install `~/go/bin/h2`:** **Not yet.** Wait for grok merge (P0) + first-run scaffold/validate order (P1), then a short R3 on those two.
