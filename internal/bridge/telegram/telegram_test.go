@@ -79,6 +79,34 @@ func TestSend_EscapesAmpersandInsideTaggedHTML(t *testing.T) {
 	}
 }
 
+func TestSend_DoesNotDoubleEscapeEntitiesInTaggedHTML(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+	if err := tg.Send(context.Background(), "<b>ok</b> a &amp; b"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if strings.Contains(gotText, "&amp;amp;") {
+		t.Errorf("double-escaped: %q", gotText)
+	}
+	if !strings.Contains(gotText, "&amp;") {
+		t.Errorf("text %q missing preserved &amp;", gotText)
+	}
+	if !strings.Contains(gotText, "<b>ok</b>") {
+		t.Errorf("lost bold tags: %q", gotText)
+	}
+}
+
 func TestSend_EscapesUntaggedSpecials(t *testing.T) {
 	var gotText, gotMode string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

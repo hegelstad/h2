@@ -80,6 +80,9 @@ func TestLooksLikeHTML(t *testing.T) {
 	if LooksLikeHTML("see <b foo") {
 		t.Fatal("unclosed <b foo must not look like html")
 	}
+	if LooksLikeHTML("<b foo") {
+		t.Fatal("bare <b foo must not look like html")
+	}
 }
 
 func TestHTML_RendersPlain(t *testing.T) {
