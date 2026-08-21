@@ -110,6 +110,74 @@ func setupMockAgent(t *testing.T, tmpDir, agentName string) *mockHookAgent {
 	return newMockHookAgent(t, sockPath)
 }
 
+// --- extractHookEventName tests ---
+
+func TestExtractHookEventName(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+		want    string
+		wantErr bool
+	}{
+		{"claude snake_case", `{"hook_event_name":"Stop"}`, "Stop", false},
+		{"grok camelCase", `{"hookEventName":"stop"}`, "stop", false},
+		{"grok user_prompt_submit", `{"hookEventName":"user_prompt_submit"}`, "user_prompt_submit", false},
+		{"snake wins when both present", `{"hook_event_name":"Stop","hookEventName":"stop"}`, "Stop", false},
+		{"missing both", `{"some_field":"value"}`, "", true},
+		{"invalid json", `not json`, "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := extractHookEventName([]byte(tt.payload))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got name=%q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("extractHookEventName(%q) = %q, want %q", tt.payload, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExtractHookEventName_MissingErrorMessage(t *testing.T) {
+	_, err := extractHookEventName([]byte(`{"some_field":"value"}`))
+	if err == nil || err.Error() != "hook_event_name not found in payload" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestHandleHook_GrokStopEvent verifies a grok-style camelCase payload is
+// extracted and forwarded to the agent with the grok event value.
+func TestHandleHook_GrokStopEvent(t *testing.T) {
+	tmpDir := shortHookTempDir(t)
+	agent := setupMockAgent(t, tmpDir, "grokagent")
+
+	payload := `{"hookEventName":"stop","sessionId":"g1","reason":"end_turn"}`
+
+	cmd := newHandleHookCmd()
+	cmd.SetArgs([]string{"--agent", "grokagent"})
+	cmd.SetIn(bytes.NewBufferString(payload))
+	cmd.SetOut(&bytes.Buffer{})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	reqs := agent.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	if reqs[0].EventName != "stop" {
+		t.Errorf("event_name = %q, want stop", reqs[0].EventName)
+	}
+}
+
 // --- handle-hook command tests ---
 
 func TestHandleHook_SendsEventToAgent(t *testing.T) {
@@ -230,7 +298,7 @@ func TestHandleHook_ErrorNoEventName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when hook_event_name missing")
 	}
-	if !strings.Contains(err.Error(), "hook event name not found") {
+	if !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }

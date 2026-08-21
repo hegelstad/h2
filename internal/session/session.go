@@ -31,6 +31,7 @@ import (
 	_ "h2/internal/session/agent/harness/claude"
 	_ "h2/internal/session/agent/harness/codex"
 	_ "h2/internal/session/agent/harness/generic"
+	_ "h2/internal/session/agent/harness/grok"
 	_ "h2/internal/session/agent/harness/opencode"
 )
 

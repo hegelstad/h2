@@ -33,6 +33,39 @@ type TypingIndicator interface {
 	SendTyping(ctx context.Context) error
 }
 
+// FormattedSender is the capability interface for bridges that support
+// rich-text formatting on outbound messages (e.g. HTML or MarkdownV2
+// parse modes on Telegram). Bridges that implement this receive a
+// parse-mode hint from `h2 send --format`.
+type FormattedSender interface {
+	SendFormatted(ctx context.Context, text, format string) error
+}
+
+// RichSender is the capability interface for bridges that support structured
+// "rich messages" — headings, lists, tables, block quotations, collapsible
+// blocks, formulas, and inline media — that go beyond a simple parse mode
+// (e.g. Telegram Bot API 10.1 sendRichMessage). markup selects how the body
+// string is interpreted: "markdown" or "html".
+type RichSender interface {
+	SendRich(ctx context.Context, text, markup string) error
+}
+
+// IsRichFormat reports whether a `--format` value targets the RichSender
+// capability rather than a plain parse-mode FormattedSender. It returns the
+// markup encoding ("markdown" or "html") the bridge should use, and ok=true
+// when the format is a rich format. Centralizing this keeps the CLI validator
+// and the bridge dispatcher in agreement on the accepted values.
+func IsRichFormat(format string) (markup string, ok bool) {
+	switch format {
+	case "rich", "rich-markdown":
+		return "markdown", true
+	case "rich-html":
+		return "html", true
+	default:
+		return "", false
+	}
+}
+
 var agentTagRe = regexp.MustCompile(`^\[([a-zA-Z0-9_-]+)\]\s*`)
 
 // ParseAgentTag extracts an "[agent-name]" tag from the start of text.

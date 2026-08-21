@@ -39,6 +39,74 @@ func (m *mockSender) Messages() []string {
 	return append([]string(nil), m.messages...)
 }
 
+// mockFormattedBridge implements Bridge, Sender, and FormattedSender.
+type mockFormattedBridge struct {
+	name           string
+	plainMessages  []string
+	formattedCalls []formattedCall
+	mu             sync.Mutex
+}
+
+type formattedCall struct {
+	Text   string
+	Format string
+}
+
+func (m *mockFormattedBridge) Name() string { return m.name }
+func (m *mockFormattedBridge) Close() error { return nil }
+func (m *mockFormattedBridge) Send(_ context.Context, text string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.plainMessages = append(m.plainMessages, text)
+	return nil
+}
+func (m *mockFormattedBridge) SendFormatted(_ context.Context, text, format string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.formattedCalls = append(m.formattedCalls, formattedCall{Text: text, Format: format})
+	return nil
+}
+func (m *mockFormattedBridge) PlainMessages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.plainMessages...)
+}
+func (m *mockFormattedBridge) FormattedCalls() []formattedCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]formattedCall(nil), m.formattedCalls...)
+}
+
+// mockRichBridge implements Bridge, Sender, and RichSender (but not
+// FormattedSender) so tests can assert rich-format routing in isolation.
+type mockRichBridge struct {
+	name      string
+	richCalls []richCall
+	mu        sync.Mutex
+}
+
+type richCall struct {
+	Text   string
+	Markup string
+}
+
+func (m *mockRichBridge) Name() string { return m.name }
+func (m *mockRichBridge) Close() error { return nil }
+func (m *mockRichBridge) Send(_ context.Context, _ string) error {
+	return nil
+}
+func (m *mockRichBridge) SendRich(_ context.Context, text, markup string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.richCalls = append(m.richCalls, richCall{Text: text, Markup: markup})
+	return nil
+}
+func (m *mockRichBridge) RichCalls() []richCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]richCall(nil), m.richCalls...)
+}
+
 // mockTypingBridge implements Bridge, Sender, and TypingIndicator.
 type mockTypingBridge struct {
 	name        string
@@ -390,7 +458,7 @@ func TestHandleOutbound(t *testing.T) {
 		"alice", "", "", t.TempDir(), nil,
 	)
 
-	svc.sendOutbound("myagent", "build complete")
+	svc.sendOutbound("myagent", "build complete", "")
 
 	// Both senders should have received the tagged message (non-concierge agent).
 	want := "[myagent] build complete"
@@ -416,7 +484,7 @@ func TestHandleOutbound_TagsNonConcierge(t *testing.T) {
 	sender := &mockSender{name: "telegram"}
 	svc := New([]bridge.Bridge{sender}, "alice", "concierge", "", t.TempDir(), nil)
 
-	svc.sendOutbound("researcher", "here are the results")
+	svc.sendOutbound("researcher", "here are the results", "")
 
 	msgs := sender.Messages()
 	if len(msgs) != 1 {
@@ -432,7 +500,7 @@ func TestHandleOutbound_NoConciergeTag(t *testing.T) {
 	sender := &mockSender{name: "telegram"}
 	svc := New([]bridge.Bridge{sender}, "alice", "concierge", "", t.TempDir(), nil)
 
-	svc.sendOutbound("concierge", "build complete")
+	svc.sendOutbound("concierge", "build complete", "")
 
 	msgs := sender.Messages()
 	if len(msgs) != 1 {
@@ -441,6 +509,96 @@ func TestHandleOutbound_NoConciergeTag(t *testing.T) {
 	// Concierge messages should NOT be tagged.
 	if msgs[0] != "build complete" {
 		t.Errorf("got %q, want %q", msgs[0], "build complete")
+	}
+}
+
+func TestSendOutbound_FormatRoutedToSendFormatted(t *testing.T) {
+	fb := &mockFormattedBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{fb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	if err := svc.sendOutbound("concierge", "<b>hi</b>", "HTML"); err != nil {
+		t.Fatalf("sendOutbound: %v", err)
+	}
+
+	calls := fb.FormattedCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 SendFormatted call, got %d", len(calls))
+	}
+	if calls[0].Text != "<b>hi</b>" {
+		t.Errorf("text = %q, want %q", calls[0].Text, "<b>hi</b>")
+	}
+	if calls[0].Format != "HTML" {
+		t.Errorf("format = %q, want HTML", calls[0].Format)
+	}
+	if plain := fb.PlainMessages(); len(plain) != 0 {
+		t.Errorf("expected no plain Send calls, got %v", plain)
+	}
+}
+
+func TestSendOutbound_FormatOnSenderOnlyBridge_Errors(t *testing.T) {
+	sender := &mockSender{name: "plain"}
+	svc := New([]bridge.Bridge{sender}, "alice", "concierge", "", t.TempDir(), nil)
+
+	err := svc.sendOutbound("concierge", "<b>hi</b>", "HTML")
+	if err == nil {
+		t.Fatalf("expected error when --format used on Sender-only bridge")
+	}
+	if !strings.Contains(err.Error(), "does not support --format") {
+		t.Errorf("error = %v, want substring \"does not support --format\"", err)
+	}
+	if msgs := sender.Messages(); len(msgs) != 0 {
+		t.Errorf("expected no plain Send calls, got %v", msgs)
+	}
+}
+
+func TestSendOutbound_RichFormatRoutedToSendRich(t *testing.T) {
+	rb := &mockRichBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{rb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	if err := svc.sendOutbound("concierge", "# Heading\n\n| a | b |", "rich"); err != nil {
+		t.Fatalf("sendOutbound: %v", err)
+	}
+
+	calls := rb.RichCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 SendRich call, got %d", len(calls))
+	}
+	if calls[0].Text != "# Heading\n\n| a | b |" {
+		t.Errorf("text = %q", calls[0].Text)
+	}
+	if calls[0].Markup != "markdown" {
+		t.Errorf("markup = %q, want markdown", calls[0].Markup)
+	}
+}
+
+func TestSendOutbound_RichHTMLFormatUsesHTMLMarkup(t *testing.T) {
+	rb := &mockRichBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{rb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	if err := svc.sendOutbound("concierge", "<h1>Hi</h1>", "rich-html"); err != nil {
+		t.Fatalf("sendOutbound: %v", err)
+	}
+
+	calls := rb.RichCalls()
+	if len(calls) != 1 || calls[0].Markup != "html" {
+		t.Fatalf("expected 1 SendRich call with html markup, got %+v", calls)
+	}
+}
+
+func TestSendOutbound_RichOnFormattedOnlyBridge_Errors(t *testing.T) {
+	// mockFormattedBridge implements FormattedSender but not RichSender.
+	fb := &mockFormattedBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{fb}, "alice", "concierge", "", t.TempDir(), nil)
+
+	err := svc.sendOutbound("concierge", "# hi", "rich")
+	if err == nil {
+		t.Fatalf("expected error when rich format used on bridge without RichSender")
+	}
+	if !strings.Contains(err.Error(), "does not support rich messages") {
+		t.Errorf("error = %v, want substring \"does not support rich messages\"", err)
+	}
+	if calls := fb.FormattedCalls(); len(calls) != 0 {
+		t.Errorf("expected no SendFormatted calls, got %v", calls)
 	}
 }
 

@@ -33,6 +33,8 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetClaudeConfigPathPrefix()
 	case "codex":
 		harnessConfigPathPrefix = role.GetCodexConfigPathPrefix()
+	case "grok":
+		harnessConfigPathPrefix = role.GetGrokConfigPathPrefix()
 	case "opencode", "opencode_ai":
 		harnessConfigPathPrefix = filepath.Join(config.ConfigDir(), "opencode-config")
 	}
@@ -58,6 +60,9 @@ func buildCommandRuntimeConfig(command string) *config.RuntimeConfig {
 	case "codex":
 		ht = "codex"
 		configPrefix = filepath.Join(config.ConfigDir(), "codex-config")
+	case "grok":
+		ht = "grok"
+		configPrefix = filepath.Join(config.ConfigDir(), "grok-config")
 	case "opencode":
 		ht = "opencode"
 		configPrefix = filepath.Join(config.ConfigDir(), "opencode-config")
@@ -197,6 +202,7 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 		ClaudePermissionMode: role.ClaudePermissionMode,
 		CodexSandboxMode:     role.CodexSandboxMode,
 		CodexAskForApproval:  role.CodexAskForApproval,
+		GrokPermissionMode:   role.GrokPermissionMode,
 		PermissionReview:     role.PermissionReview,
 		AdditionalDirs:       additionalDirs,
 		Overrides:            overrideMap,

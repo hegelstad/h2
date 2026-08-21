@@ -10,6 +10,7 @@ import (
 	_ "h2/internal/session/agent/harness/claude"
 	_ "h2/internal/session/agent/harness/codex"
 	_ "h2/internal/session/agent/harness/generic"
+	_ "h2/internal/session/agent/harness/grok"
 	_ "h2/internal/session/agent/harness/opencode"
 )
 
@@ -124,6 +125,16 @@ func TestResolve_ClaudeCode_ConfigPassthrough(t *testing.T) {
 	envVars := h.BuildCommandEnvVars("/unused")
 	if envVars["CLAUDE_CONFIG_DIR"] != "/tmp/test/config" {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want %q", envVars["CLAUDE_CONFIG_DIR"], "/tmp/test/config")
+	}
+}
+
+func TestResolve_Grok(t *testing.T) {
+	h, err := harness.Resolve(&config.RuntimeConfig{HarnessType: "grok"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if h.Name() != "grok" {
+		t.Errorf("Name() = %q, want grok", h.Name())
 	}
 }
 

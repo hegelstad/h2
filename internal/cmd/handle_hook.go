@@ -52,18 +52,13 @@ Exits 0 with JSON on stdout.`,
 
 			eventName := eventFlag
 			if eventName == "" {
-				var envelope struct {
-					HookEventName string `json:"hook_event_name"`
+				if len(bytes.TrimSpace(data)) == 0 {
+					return fmt.Errorf("hook event name not found (pass --event or hook_event_name in JSON)")
 				}
-				if len(bytes.TrimSpace(data)) > 0 {
-					if err := json.Unmarshal(data, &envelope); err != nil {
-						return fmt.Errorf("parse hook JSON: %w", err)
-					}
+				eventName, err = extractHookEventName(data)
+				if err != nil {
+					return err
 				}
-				eventName = envelope.HookEventName
-			}
-			if eventName == "" {
-				return fmt.Errorf("hook event name not found (pass --event or hook_event_name in JSON)")
 			}
 			if forcedPermissionResult != "" && !isValidForcedPermissionResult(forcedPermissionResult) {
 				return fmt.Errorf("--force-permission-request-result must be one of: deny, allow, ask_user")
@@ -126,6 +121,29 @@ Exits 0 with JSON on stdout.`,
 	cmd.Flags().Float64Var(&delayPermissionRequestSeconds, "delay-permission-request-seconds", 0, "Testing helper: for PermissionRequest only, delay before decision handling (after forwarding the hook event)")
 
 	return cmd
+}
+
+// extractHookEventName pulls the hook event name out of a hook payload,
+// supporting both Claude Code's snake_case "hook_event_name" and Grok Build's
+// camelCase "hookEventName". The snake_case key wins when both are present.
+// The returned value is the harness's own event vocabulary (Claude PascalCase
+// like "Stop"; Grok snake_case like "stop") — downstream dispatch is per-harness.
+func extractHookEventName(data []byte) (string, error) {
+	var envelope struct {
+		Snake string `json:"hook_event_name"`
+		Camel string `json:"hookEventName"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return "", fmt.Errorf("parse hook JSON: %w", err)
+	}
+	name := envelope.Snake
+	if name == "" {
+		name = envelope.Camel
+	}
+	if name == "" {
+		return "", fmt.Errorf("hook_event_name not found in payload")
+	}
+	return name, nil
 }
 
 // sendHookEvent forwards a hook event to the agent's socket. Best-effort:
