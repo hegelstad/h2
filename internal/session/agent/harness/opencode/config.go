@@ -90,6 +90,10 @@ func renderConfigJSON(model string) ([]byte, error) {
 	cfg := map[string]any{
 		"$schema": "https://opencode.ai/config.json",
 		"model":   model,
+		// Route auxiliary tasks (session-title/summary generation) to the same
+		// model. opencode otherwise defaults these to a paid model, which errors
+		// on a free OpenRouter account ("requires more credits") and spams logs.
+		"small_model": model,
 		"provider": map[string]any{
 			"openrouter": map[string]any{
 				"options": map[string]any{
