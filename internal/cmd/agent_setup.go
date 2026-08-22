@@ -44,6 +44,11 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		Model:                   role.GetModel(),
 		HarnessConfigPathPrefix: harnessConfigPathPrefix,
 		Profile:                 role.GetProfile(),
+		// SystemPrompt/Instructions are needed at pre-launch EnsureConfigDir
+		// time: the opencode harness materializes the role prompt into AGENTS.md
+		// from these fields. Omitting them left opencode agents with no role.
+		SystemPrompt: role.SystemPrompt,
+		Instructions: role.GetInstructions(),
 	}
 }
 

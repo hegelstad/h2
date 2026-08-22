@@ -24,14 +24,6 @@ func (h *OpencodeHarness) configDir() string {
 	return h.rc.HarnessConfigDir()
 }
 
-func (h *OpencodeHarness) dataDir() string {
-	cfg := h.configDir()
-	if cfg == "" {
-		return ""
-	}
-	return filepath.Join(cfg, "data")
-}
-
 func (h *OpencodeHarness) resolvedModel() string {
 	if h.rc != nil && h.rc.Model != "" {
 		return h.rc.Model
