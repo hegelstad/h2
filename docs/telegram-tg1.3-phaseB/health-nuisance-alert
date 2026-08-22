@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""
+health-nuisance-alert
+
+Varsler på Telegram om ting som kan plage kroppen:
+1. Pollennivåer høye nok til å gi symptomer selv hos ikke-allergikere
+   (Open-Meteo air quality API, CAMS europeisk pollenvarsel, korn/m3).
+2. Lufttrykksendringer som er kjent for å utløse hodepine/migrene
+   (Open-Meteo forecast, trykk ved havnivå; raske fall/stigninger).
+
+Kjøres via cron (07:00 og 15:00 lokal tid). Stille når alt er ok.
+Konfig:  ~/h2home/state/health-alert-config.json (lages med defaults ved første kjøring)
+Tilstand: ~/h2home/state/health-alert-state.json (debounce per varseltype)
+Flagg: --verbose (print i stedet for stille suksess), --force (ignorer debounce),
+       --dry-run (aldri send, bare print), --selftest (kjør interne tester)
+"""
+import json
+import os
+import sys
+import urllib.request
+from datetime import datetime, timedelta, timezone
+
+from telegram_env import h2_send_telegram, html_esc
+
+CONFIG_FILE = os.path.expanduser("~/h2home/state/health-alert-config.json")
+STATE_FILE = os.path.expanduser("~/h2home/state/health-alert-state.json")
+H2_CONFIG = os.path.expanduser("~/h2home/config.yaml")
+
+DEFAULT_CONFIG = {
+    "place": "Oslo",
+    "lat": 59.9139,
+    "lon": 10.7522,
+    # korn/m3 der selv ikke-allergikere kan merke det (irritasjon i luftveier/øyne).
+    # Basert på polleninfo-kategorien "svært høy" per art.
+    "pollen_thresholds": {
+        "alder_pollen": 100,
+        "birch_pollen": 500,
+        "grass_pollen": 100,
+        "mugwort_pollen": 50,
+        "ragweed_pollen": 20,
+    },
+    "pollen_names": {
+        "alder_pollen": "or",
+        "birch_pollen": "bjørk",
+        "grass_pollen": "gress",
+        "mugwort_pollen": "burot",
+        "ragweed_pollen": "ambrosia",
+    },
+    # hPa-endringer forbundet med trykkutløst hodepine/migrene
+    "pressure_drop_24h": 6.0,
+    "pressure_rise_24h": 8.0,
+    "pressure_fast_6h": 4.0,
+    "debounce_hours": 18,
+}
+
+
+def log(msg):
+    print(f"[{datetime.now().isoformat(timespec='seconds')}] {msg}")
+
+
+def load_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def load_config():
+    cfg = load_json(CONFIG_FILE, None)
+    if cfg is None:
+        cfg = dict(DEFAULT_CONFIG)
+        os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2, ensure_ascii=False)
+        log(f"wrote default config to {CONFIG_FILE}")
+    for k, v in DEFAULT_CONFIG.items():
+        cfg.setdefault(k, v)
+    return cfg
+
+
+def _read_yaml_field(key):
+    try:
+        with open(H2_CONFIG) as f:
+            for line in f:
+                if key in line:
+                    return line.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+def tg_send(msg):
+    # tg1.3: route through the h2 bridge (the choke point applies the HTML
+    # default and mirrors to concierge). Not a recovery script, so no
+    # bridge-dependency concern. build_message() emits the HTML tags; dynamic
+    # values are html_esc'd.
+    h2_send_telegram(msg)
+
+
+def fetch_json(url):
+    with urllib.request.urlopen(url, timeout=20) as r:
+        return json.load(r)
+
+
+# ---------- ren logikk (testbar) ----------
+
+def pollen_findings(times, series, thresholds, names, now_idx, horizon=24):
+    """Peak per art i de neste `horizon` timene; returner arter over terskel."""
+    out = []
+    window = slice(now_idx, min(now_idx + horizon, len(times)))
+    for key, thr in thresholds.items():
+        vals = series.get(key) or []
+        vals = [(v, i) for i, v in enumerate(vals[window], start=window.start) if v is not None]
+        if not vals:
+            continue
+        peak, idx = max(vals)
+        if peak >= thr:
+            out.append({"art": names.get(key, key), "peak": peak, "thr": thr, "time": times[idx]})
+    return out
+
+
+def max_window_change(pressure, times, now_idx, window_h):
+    """Størst signert endring over et vindu på window_h timer, for vinduer som
+    overlapper [now-6h, now+24h]. Returnerer (delta, fra_tid, til_tid)."""
+    best = (0.0, None, None)
+    lo = max(0, now_idx - 6)
+    hi = min(len(pressure) - window_h, now_idx + 24)
+    for i in range(lo, max(lo, hi) + 1):
+        j = i + window_h
+        if j >= len(pressure) or pressure[i] is None or pressure[j] is None:
+            continue
+        d = pressure[j] - pressure[i]
+        if abs(d) > abs(best[0]):
+            best = (d, times[i], times[j])
+    return best
+
+
+def pressure_findings(times, pressure, cfg, now_idx):
+    out = []
+    d24, f24, t24 = max_window_change(pressure, times, now_idx, 24)
+    if d24 <= -cfg["pressure_drop_24h"]:
+        out.append({"type": "fall", "delta": d24, "fra": f24, "til": t24, "vindu": "24t"})
+    elif d24 >= cfg["pressure_rise_24h"]:
+        out.append({"type": "stigning", "delta": d24, "fra": f24, "til": t24, "vindu": "24t"})
+    d6, f6, t6 = max_window_change(pressure, times, now_idx, 6)
+    if abs(d6) >= cfg["pressure_fast_6h"]:
+        out.append({"type": "fall" if d6 < 0 else "stigning", "delta": d6,
+                    "fra": f6, "til": t6, "vindu": "6t"})
+    return out
+
+
+def fmt_time(iso):
+    # "2026-07-07T14:00" -> "ti 07.07 kl 14"
+    dt = datetime.fromisoformat(iso)
+    days = ["ma", "ti", "on", "to", "fr", "lø", "sø"]
+    return f"{days[dt.weekday()]} {dt.day:02d}.{dt.month:02d} kl {dt.hour:02d}"
+
+
+def build_message(place, pollen, pressure):
+    lines = [f"<b>Helsevarsel for {html_esc(place)}</b>"]
+    if pollen:
+        lines.append("")
+        lines.append("<b>Pollen på nivåer som kan plage selv ikke-allergikere:</b>")
+        for p in pollen:
+            lines.append(f"• {html_esc(p['art'])}: topp ~{p['peak']:.0f} korn/m³ {fmt_time(p['time'])} (terskel {p['thr']})")
+    if pressure:
+        lines.append("")
+        lines.append("<b>Lufttrykk: endring i hodepine-/migrenesonen:</b>")
+        for q in pressure:
+            lines.append(
+                f"• {q['type'].capitalize()} på {abs(q['delta']):.1f} hPa over {q['vindu']} "
+                f"({fmt_time(q['fra'])} → {fmt_time(q['til'])})"
+            )
+        lines.append("<i>Drikk vann, vurder å ligge unna skjerm i kveld, og ha smertestillende tilgjengelig.</i>")
+    return "\n".join(lines)
+
+
+def debounced(state, key, hours, now):
+    last = state.get(key)
+    if last is None:
+        return False
+    return (now - datetime.fromisoformat(last)) < timedelta(hours=hours)
+
+
+# ---------- selftest ----------
+
+def selftest():
+    times = [f"2026-07-07T{h:02d}:00" for h in range(24)] + [f"2026-07-08T{h:02d}:00" for h in range(24)]
+    # pollen: gress topper på 120 om 5 timer
+    series = {"grass_pollen": [10] * 48}
+    series["grass_pollen"][5] = 120
+    f = pollen_findings(times, series, {"grass_pollen": 100}, {"grass_pollen": "gress"}, now_idx=0)
+    assert len(f) == 1 and f[0]["peak"] == 120, f
+    f = pollen_findings(times, series, {"grass_pollen": 200}, {}, now_idx=0)
+    assert f == [], f
+    # trykk: lineært fall 0.5 hPa/t = 12 hPa/24t
+    p = [1010 - 0.5 * i for i in range(48)]
+    d, _, _ = max_window_change(p, times, now_idx=6, window_h=24)
+    assert abs(d + 12.0) < 1e-6, d
+    pf = pressure_findings(times, p, DEFAULT_CONFIG, now_idx=6)
+    assert any(x["vindu"] == "24t" and x["type"] == "fall" for x in pf), pf
+    # flatt trykk: ingen funn
+    pf = pressure_findings(times, [1010.0] * 48, DEFAULT_CONFIG, now_idx=6)
+    assert pf == [], pf
+    # debounce
+    now = datetime(2026, 7, 7, 12, 0)
+    st = {"pollen": (now - timedelta(hours=3)).isoformat()}
+    assert debounced(st, "pollen", 18, now) is True
+    assert debounced(st, "pollen", 2, now) is False
+    print("selftest OK")
+
+
+# ---------- main ----------
+
+def main():
+    args = set(sys.argv[1:])
+    if "--selftest" in args:
+        selftest()
+        return
+    verbose = "--verbose" in args or "--dry-run" in args
+    cfg = load_config()
+    state = load_json(STATE_FILE, {})
+    now = datetime.now()
+
+    aq = fetch_json(
+        "https://air-quality-api.open-meteo.com/v1/air-quality"
+        f"?latitude={cfg['lat']}&longitude={cfg['lon']}"
+        "&hourly=" + ",".join(cfg["pollen_thresholds"].keys()) +
+        "&forecast_days=2&timezone=Europe%2FOslo"
+    )
+    fc = fetch_json(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={cfg['lat']}&longitude={cfg['lon']}"
+        "&hourly=pressure_msl&past_days=1&forecast_days=2&timezone=Europe%2FOslo"
+    )
+
+    aq_times = aq["hourly"]["time"]
+    aq_now = max(0, min(range(len(aq_times)),
+                        key=lambda i: abs(datetime.fromisoformat(aq_times[i]) - now)))
+    pollen = pollen_findings(aq_times, aq["hourly"], cfg["pollen_thresholds"],
+                             cfg["pollen_names"], aq_now)
+
+    fc_times = fc["hourly"]["time"]
+    fc_now = max(0, min(range(len(fc_times)),
+                        key=lambda i: abs(datetime.fromisoformat(fc_times[i]) - now)))
+    pressure = pressure_findings(fc_times, fc["hourly"]["pressure_msl"], cfg, fc_now)
+
+    force = "--force" in args
+    if pollen and debounced(state, "pollen", cfg["debounce_hours"], now) and not force:
+        log(f"pollen findings suppressed by debounce: {pollen}") if verbose else None
+        pollen = []
+    if pressure and debounced(state, "pressure", cfg["debounce_hours"], now) and not force:
+        log(f"pressure findings suppressed by debounce: {pressure}") if verbose else None
+        pressure = []
+
+    if not pollen and not pressure:
+        if verbose:
+            log("no findings above thresholds")
+        return
+
+    msg = build_message(cfg["place"], pollen, pressure)
+    if "--dry-run" in args:
+        print(msg)
+        return
+    tg_send(msg)
+    if pollen:
+        state["pollen"] = now.isoformat()
+    if pressure:
+        state["pressure"] = now.isoformat()
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f, indent=2)
+    log(f"alert sent: pollen={len(pollen)} pressure={len(pressure)}")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log(f"ERROR: {e}")
+        sys.exit(1)

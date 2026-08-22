@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# GitHub activity monitor for hegelstad
+# Polls GitHub Events API and sends new events via h2 to telegram
+set -euo pipefail
+
+STATE_FILE="/home/ubuntu/h2home/.gh-monitor-seen-ids"
+GH_USER="hegelstad"
+
+# Load seen event IDs into a set
+declare -A SEEN
+if [[ -f "$STATE_FILE" ]]; then
+    while IFS= read -r id; do
+        [[ -n "$id" ]] && SEEN["$id"]=1
+    done < "$STATE_FILE"
+fi
+
+# Fetch recent events
+EVENTS=$(gh api "/users/${GH_USER}/events?per_page=30" 2>/dev/null) || exit 0
+
+if [[ -z "$EVENTS" || "$EVENTS" == "[]" ]]; then
+    exit 0
+fi
+
+# If no state file yet, save all current IDs and exit (don't spam old events)
+if [[ ${#SEEN[@]} -eq 0 ]]; then
+    echo "$EVENTS" | jq -r '.[].id' > "$STATE_FILE"
+    exit 0
+fi
+
+# Build JSON array of seen IDs for jq
+SEEN_JSON=$(printf '%s\n' "${!SEEN[@]}" | jq -R . | jq -s .)
+
+# Find new events (IDs we haven't seen before)
+NEW_EVENTS=$(echo "$EVENTS" | jq --argjson seen "$SEEN_JSON" '
+    [.[] | select(.id as $id | $seen | index($id) | not)]
+')
+
+COUNT=$(echo "$NEW_EVENTS" | jq 'length')
+
+if [[ "$COUNT" == "0" ]]; then
+    { echo "$EVENTS" | jq -r '.[].id'; printf '%s\n' "${!SEEN[@]}"; } | sort -u | tail -n 500 > "$STATE_FILE"
+    exit 0
+fi
+
+# Format as Telegram HTML. Repo/PR/issue names are links; titles are escaped.
+MESSAGE=$(echo "$NEW_EVENTS" | jq -r '
+    def a($url; $text):
+      "<a href=\"" + ($url | @html) + "\">" + ($text | @html) + "</a>";
+    def repo_url:
+      "https://github.com/" + .repo.name;
+    def repo_a:
+      a(repo_url; .repo.name);
+    def when:
+      " (" + (.created_at | split("T") | .[1] | split("Z") | .[0]) + " UTC)";
+
+    .[] |
+    "- " +
+    (if .type == "PushEvent" then
+        "Push to " + repo_a +
+        (if .payload.commits then
+            " (" +
+            (if (.payload.commits | length) > 0 and (.payload.head != null) then
+                a("https://github.com/" + .repo.name + "/commit/" + .payload.head;
+                  (.payload.commits | length | tostring) + " commits")
+             elif .payload.before != null and .payload.head != null then
+                a("https://github.com/" + .repo.name + "/compare/" + .payload.before[0:7] + "..." + .payload.head[0:7];
+                  (.payload.commits | length | tostring) + " commits")
+             else
+                (.payload.commits | length | tostring) + " commits"
+             end) +
+            ")"
+         else "" end)
+    elif .type == "CreateEvent" then
+        "Created " + .payload.ref_type + " " + ((.payload.ref // "") | @html) + " in " + repo_a
+    elif .type == "DeleteEvent" then
+        "Deleted " + .payload.ref_type + " " + ((.payload.ref // "") | @html) + " in " + repo_a
+    elif .type == "IssuesEvent" then
+        .payload.action + " " +
+        a(.payload.issue.html_url; "issue #" + (.payload.issue.number | tostring)) +
+        " in " + repo_a + ": " + (.payload.issue.title | @html)
+    elif .type == "IssueCommentEvent" then
+        "Commented on " +
+        a(.payload.comment.html_url; "issue #" + (.payload.issue.number | tostring)) +
+        " in " + repo_a
+    elif .type == "PullRequestEvent" then
+        .payload.action + " " +
+        a(.payload.pull_request.html_url; "PR #" + (.payload.pull_request.number | tostring)) +
+        " in " + repo_a + ": " + (.payload.pull_request.title | @html)
+    elif .type == "PullRequestReviewEvent" then
+        "Reviewed " +
+        a(.payload.pull_request.html_url; "PR #" + (.payload.pull_request.number | tostring)) +
+        " in " + repo_a
+    elif .type == "ForkEvent" then
+        "Forked " + repo_a +
+        (if .payload.forkee.html_url != null and .payload.forkee.html_url != repo_url then
+            " → " + a(.payload.forkee.html_url; .payload.forkee.full_name)
+         else "" end)
+    elif .type == "WatchEvent" then
+        "Starred " + repo_a
+    elif .type == "ReleaseEvent" then
+        .payload.action + " release " +
+        a(.payload.release.html_url; .payload.release.tag_name) +
+        " in " + repo_a
+    elif .type == "PublicEvent" then
+        "Made " + repo_a + " public"
+    elif .type == "MemberEvent" then
+        .payload.action + " member " + (.payload.member.login | @html) + " in " + repo_a
+    else
+        .type + " in " + repo_a
+    end) + when
+')
+
+h2 send telegram --file <(printf '%s\n\n%s\n' "<b>GitHub Activity Alert</b> (${COUNT} new events)" "${MESSAGE}")
+
+# Save all current event IDs as seen (union with prior state, cap at 500)
+{ echo "$EVENTS" | jq -r '.[].id'; printf '%s\n' "${!SEEN[@]}"; } | sort -u | tail -n 500 > "$STATE_FILE"

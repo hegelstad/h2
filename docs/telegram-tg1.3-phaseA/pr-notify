@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""
+PR notification daemon — polls repos for new open PRs, sends Telegram
+with title, preview URL, and merge instructions.
+Runs every 2 minutes via cron.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+H2_CONFIG = Path.home() / "h2home/config.yaml"
+STATE_FILE = Path.home() / "h2home/state/pr-notify-state.json"
+
+REPOS = [
+    # jaktformidling muted 2026-07-28: project shelved, so its only PR traffic is
+    # Dependabot security updates. The alerts still exist on GitHub — this only
+    # silences the Telegram ping. Re-add the line to hear about it again.
+    # {"owner": "hegelstad", "repo": "jaktformidling", "platform": "vercel"},
+    {"owner": "nikolaihegelstad", "repo": "eafieldnotes", "platform": "cloudflare"},
+]
+
+
+def read_yaml_field(key):
+    try:
+        for line in H2_CONFIG.read_text().splitlines():
+            if key in line:
+                return line.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+from telegram_env import h2_send_telegram, html_attr, html_esc
+
+
+def gh(args):
+    result = subprocess.run(
+        ["gh"] + args,
+        capture_output=True, text=True, timeout=30
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return result.stdout.strip() or None
+
+
+def get_preview_url(owner, repo, branch, platform):
+    """Get deployment preview URL for the PR branch."""
+    deployments = gh(["api", f"repos/{owner}/{repo}/deployments",
+                      "--paginate", "--jq", ".[]"])
+    if not deployments:
+        return None
+
+    # Parse line-by-line JSON (gh api --jq outputs one JSON per line)
+    for line in deployments.splitlines() if isinstance(deployments, str) else []:
+        try:
+            d = json.loads(line)
+            # Match deployment to branch
+            ref = d.get("ref", "")
+            if branch not in ref and ref not in branch:
+                continue
+            if d.get("environment", "").lower() not in ("preview", "staging"):
+                continue
+            dep_id = d.get("id")
+            statuses = gh(["api", f"repos/{owner}/{repo}/deployments/{dep_id}/statuses"])
+            if statuses and isinstance(statuses, list):
+                for s in statuses:
+                    url = s.get("environment_url", "")
+                    if url and s.get("state") == "success":
+                        return url
+        except (json.JSONDecodeError, Exception):
+            continue
+
+    return None
+
+
+def get_pr_summary(owner, repo, pr_number):
+    """Fetch PR details."""
+    pr = gh(["pr", "view", str(pr_number),
+             "--repo", f"{owner}/{repo}",
+             "--json", "title,url,body,headRefName,author,additions,deletions,commits"])
+    return pr
+
+
+def load_state():
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"notified": {}}
+
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def format_notification(owner, repo, pr, preview_url):
+    title = html_esc(pr.get("title", ""))
+    url = pr.get("url", "")
+    branch = html_esc(pr.get("headRefName", ""))
+    author = html_esc(pr.get("author", {}).get("login", "agent"))
+    additions = pr.get("additions", 0)
+    deletions = pr.get("deletions", 0)
+    body = (pr.get("body") or "").strip()
+    pr_num = html_esc(url.rstrip("/").split("/")[-1])
+    repo_esc = html_esc(repo)
+
+    body_summary = ""
+    if body:
+        short = html_esc(body[:200])
+        if len(body) > 200:
+            short += "..."
+        body_summary = f"\n{short}"
+
+    if preview_url:
+        preview_line = (
+            f'\n\n<b>Preview:</b> <a href="{html_attr(preview_url)}">{html_esc(preview_url)}</a>'
+        )
+    else:
+        preview_line = "\n\n<i>Preview: venter på deployment...</i>"
+
+    return (
+        f"<b>Ny PR klar for review</b>\n\n"
+        f"<b>{title}</b>{body_summary}\n\n"
+        f"<b>Repo:</b> {repo_esc} | <b>Branch:</b> <code>{branch}</code>\n"
+        f"<b>Endringer:</b> +{additions} -{deletions} | <b>Av:</b> {author}"
+        f"{preview_line}\n\n"
+        f'<a href="{html_attr(url)}">Se PR #{pr_num} på GitHub</a>\n\n'
+        f"Svar <code>merge {repo_esc} #{pr_num}</code> for å merge."
+    )
+
+
+def main():
+    state = load_state()
+    notified = state.get("notified", {})
+
+    for r in REPOS:
+        owner, repo, platform = r["owner"], r["repo"], r["platform"]
+        prs = gh(["pr", "list", "--repo", f"{owner}/{repo}",
+                  "--state", "open",
+                  "--json", "number,title,headRefName,createdAt,url"])
+        if not prs:
+            continue
+
+        for pr_meta in prs:
+            pr_num = str(pr_meta["number"])
+            key = f"{owner}/{repo}#{pr_num}"
+
+            if key in notified:
+                continue  # already notified
+
+            # New PR — fetch details
+            pr = get_pr_summary(owner, repo, pr_num)
+            if not pr:
+                continue
+
+            branch = pr.get("headRefName", "")
+            preview_url = get_preview_url(owner, repo, branch, platform)
+
+            msg = format_notification(owner, repo, pr, preview_url)
+            try:
+                h2_send_telegram(msg)
+                notified[key] = {
+                    "title": pr.get("title", ""),
+                    "notified_at": time.time(),
+                    "preview_url": preview_url,
+                    "pr_url": pr.get("url", ""),
+                }
+                print(f"Notified: {key}", flush=True)
+            except Exception as e:
+                print(f"Failed to notify {key}: {e}", flush=True)
+
+        # Check if any previously notified PR now has a preview URL when it didn't before
+        for key, info in list(notified.items()):
+            if not key.startswith(f"{owner}/{repo}#"):
+                continue
+            if info.get("preview_url"):
+                continue
+            pr_num = key.split("#")[-1]
+            pr = get_pr_summary(owner, repo, pr_num)
+            if not pr:
+                continue
+            branch = pr.get("headRefName", "")
+            preview_url = get_preview_url(owner, repo, branch, platform)
+            if preview_url:
+                pr_url = info.get("pr_url", "")
+                try:
+                    h2_send_telegram(
+                        f"Preview er klar for PR #{html_esc(pr_num)} ({html_esc(repo)}):\n"
+                        f'<a href="{html_attr(preview_url)}">{html_esc(preview_url)}</a>\n\n'
+                        f'<a href="{html_attr(pr_url)}">GitHub PR</a> | '
+                        f"Svar <code>merge {html_esc(repo)} #{html_esc(pr_num)}</code> for å merge."
+                    )
+                    notified[key]["preview_url"] = preview_url
+                    print(f"Sent preview URL update: {key}", flush=True)
+                except Exception as e:
+                    print(f"Failed preview update {key}: {e}", flush=True)
+
+    state["notified"] = notified
+    save_state(state)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""
+visual-verify: capture full-page screenshots of a URL at desktop + mobile
+widths so a change can actually be SEEN before it ships. Optionally sends the
+shots to Telegram for human visual approval.
+
+This is the visual step of the verify loop: `npm run build` proves it compiles,
+this proves it doesn't look broken. Build passing is necessary, not sufficient.
+
+Usage:
+  visual-verify <url>                      # desktop + mobile shots into /tmp
+  visual-verify <url> --label home         # name the output files
+  visual-verify <url> --out-dir DIR        # where to write the PNGs
+  visual-verify <url> --telegram           # also send the shots to Telegram
+  visual-verify <url> --caption "text"     # caption for the Telegram send
+  visual-verify <url> --wait 4             # seconds to wait for JS/layout
+  visual-verify <url> --width-only 1280    # single custom viewport width
+
+Exit code is non-zero if any viewport fails to render.
+"""
+import sys
+import os
+import asyncio
+import argparse
+import subprocess
+import warnings
+from html import escape as html_escape
+
+warnings.filterwarnings('ignore', category=ResourceWarning)
+sys.path.insert(0, '/home/ubuntu/h2home/tools/browse-env/lib/python3.12/site-packages')
+
+CONFIG_YAML = '/home/ubuntu/h2home/config.yaml'
+VIEWPORTS = {'desktop': (1280, 900), 'mobile': (390, 844)}
+
+
+def telegram_creds():
+    """Pull bot_token + chat_id from the shared secrets file."""
+    from telegram_env import load_telegram_creds
+
+    return load_telegram_creds()
+
+
+def send_telegram_doc(path, caption=''):
+    """Send as a DOCUMENT, not a photo: full-page shots are tall and Telegram
+    compresses photos to low-res. Documents arrive uncompressed/full quality.
+
+    sendDocument stays on the Bot API (the h2 bridge has no file equivalent).
+    Accompanying caption/text is routed through `h2 send telegram` so the
+    bridge applies HTML and mirrors a copy to concierge.
+    """
+    token, chat = telegram_creds()
+    if not token or not chat:
+        print('  telegram: creds not found, skipping send', file=sys.stderr)
+        return False
+    r = subprocess.run(
+        ['curl', '-sS', '-o', '/dev/null', '-w', '%{http_code}',
+         f'https://api.telegram.org/bot{token}/sendDocument',
+         '-F', f'chat_id={chat}',
+         '-F', f'document=@{path}'],
+        capture_output=True, text=True)
+    ok = r.stdout.strip() == '200'
+    if not ok:
+        print(f'  telegram send failed ({r.stdout.strip()})', file=sys.stderr)
+        return False
+    if caption:
+        from telegram_env import h2_send_telegram
+        try:
+            h2_send_telegram(html_escape(caption))
+        except Exception as e:  # noqa: BLE001
+            print(f'  telegram caption send failed ({e})', file=sys.stderr)
+    return True
+
+
+async def shot(url, w, h, out_path, wait):
+    import nodriver as uc
+    config = uc.Config()
+    config.headless = True
+    config.sandbox = False
+    config.add_argument('--disable-gpu')
+    config.add_argument('--disable-dev-shm-usage')
+    config.add_argument('--hide-scrollbars')
+    config.add_argument(f'--window-size={w},{h}')
+    config.add_argument('--force-device-scale-factor=1')
+    browser = await uc.start(config=config)
+    try:
+        page = await browser.get(url)
+        await page.sleep(wait)
+        await page.save_screenshot(out_path, format='png', full_page=True)
+    finally:
+        browser.stop()
+
+
+async def run(args):
+    import logging
+    logging.disable(logging.CRITICAL)
+    # nodriver's browser.stop() schedules connection-lost callbacks that fire
+    # after the loop is torn down; swallow that cosmetic noise so the tool's
+    # output stays clean for use as a verify-loop gate.
+    asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: None)
+
+    if args.width_only:
+        viewports = {f'{args.width_only}w': (args.width_only, 900)}
+    else:
+        viewports = VIEWPORTS
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    failures = 0
+    for name, (w, h) in viewports.items():
+        out_path = os.path.join(args.out_dir, f'{args.label}-{name}.png')
+        try:
+            await shot(args.url, w, h, out_path, args.wait)
+            size = os.path.getsize(out_path)
+            print(f'{name:8s} {w}x{h}  ->  {out_path}  ({size//1024} KB)')
+            if args.telegram:
+                cap = args.caption or f'{args.label} · {name} ({w}px)'
+                send_telegram_doc(out_path, cap)
+        except Exception as e:  # noqa: BLE001
+            failures += 1
+            print(f'{name:8s} FAILED: {e}', file=sys.stderr)
+    return failures
+
+
+def main():
+    p = argparse.ArgumentParser(description='Visual verify: desktop + mobile screenshots')
+    p.add_argument('url')
+    p.add_argument('--label', default='page', help='basename for output files')
+    p.add_argument('--out-dir', default='/tmp/visual-verify', help='output directory')
+    p.add_argument('--telegram', action='store_true', help='send shots to Telegram')
+    p.add_argument('--caption', default='', help='Telegram caption')
+    p.add_argument('--wait', type=float, default=3.5, help='seconds to wait for layout')
+    p.add_argument('--width-only', type=int, help='single custom viewport width')
+    args = p.parse_args()
+    sys.exit(asyncio.run(run(args)))
+
+
+if __name__ == '__main__':
+    main()

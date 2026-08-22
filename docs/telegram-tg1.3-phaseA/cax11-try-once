@@ -1,0 +1,88 @@
+#!/bin/bash
+# Try to provision a CAX11 if any EU DC has capacity.
+# Idempotent: skips if state file already exists (server provisioned).
+# Notifies Telegram on success or persistent failure.
+set -u
+HCLOUD_TOKEN=$(cat /home/ubuntu/h2home/state/.hetzner-token)
+H2="${H2:-/usr/local/bin/h2}"
+STATE=/home/ubuntu/h2home/state/cax11-state.json
+LOG=/home/ubuntu/h2home/state/cax11-poll.log
+TYPE_ID=45  # cax11
+PRIORITY=("fsn1" "hel1" "nbg1")
+
+ts() { date +"%Y-%m-%d %H:%M:%S"; }
+log() { echo "[$(ts)] $*" >> "$LOG"; }
+
+html_escape() {
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+tg() {
+    "$H2" send telegram --file <(printf '%s\n' "$1") >/dev/null
+}
+
+# Skip hvis allerede provisjonert
+if [ -f "$STATE" ]; then
+    log "Server allerede provisjonert; ingen handling. Slett $STATE for å re-aktivere polling."
+    exit 0
+fi
+
+DCS=$(curl -s -H "Authorization: Bearer $HCLOUD_TOKEN" "https://api.hetzner.cloud/v1/datacenters" \
+    | jq -r --argjson tid "$TYPE_ID" '.datacenters[] | select(.server_types.available | contains([$tid])) | .location.name' \
+    | sort -u)
+
+if [ -z "$DCS" ]; then
+    log "CAX11 fortsatt utsolgt i alle EU-DCer"
+    exit 0
+fi
+
+log "CAX11 LEDIG i: $DCS"
+TARGET=""
+for P in "${PRIORITY[@]}"; do
+    if echo "$DCS" | grep -q "^$P$"; then
+        TARGET="$P"
+        break
+    fi
+done
+[ -z "$TARGET" ] && TARGET=$(echo "$DCS" | head -1)
+
+log "Oppretter CAX11 i $TARGET"
+RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $HCLOUD_TOKEN" -H "Content-Type: application/json" \
+    https://api.hetzner.cloud/v1/servers \
+    -d "{
+        \"name\": \"h2-cloud\",
+        \"server_type\": \"cax11\",
+        \"image\": \"ubuntu-24.04\",
+        \"location\": \"$TARGET\",
+        \"ssh_keys\": [\"id_ed25519\"],
+        \"start_after_create\": true,
+        \"public_net\": {\"enable_ipv4\": true, \"enable_ipv6\": true},
+        \"labels\": {\"role\": \"h2-runtime\", \"managed-by\": \"claude\"}
+    }")
+
+ERROR=$(echo "$RESPONSE" | jq -r '.error.code // ""')
+if [ -z "$ERROR" ]; then
+    IP=$(echo "$RESPONSE" | jq -r '.server.public_net.ipv4.ip')
+    IPV6=$(echo "$RESPONSE" | jq -r '.server.public_net.ipv6.ip')
+    ID=$(echo "$RESPONSE" | jq -r '.server.id')
+    log "SUKSESS! Server ID=$ID IP=$IP location=$TARGET"
+    echo "$RESPONSE" > "$STATE"
+    tg "<b>🎉 CAX11 provisjonert!</b>
+<b>Location:</b> $(html_escape "$TARGET")
+<b>IPv4:</b> <code>$(html_escape "$IP")</code>
+<b>IPv6:</b> <code>$(html_escape "$IPV6")</code>
+<b>ID:</b> $(html_escape "$ID")
+
+SSH: <code>ssh root@$(html_escape "$IP")</code>"
+    exit 0
+else
+    MSG=$(echo "$RESPONSE" | jq -r '.error.message')
+    log "Opprettelse feilet: $ERROR - $MSG"
+    # Ikke spam Telegram for resource_unavailable (kapasitet kommer og går)
+    if [ "$ERROR" != "resource_unavailable" ]; then
+        tg "<b>⚠️ CAX11-opprettelse feilet</b>
+<b>Code:</b> $(html_escape "$ERROR")
+<b>Message:</b> $(html_escape "$MSG")"
+    fi
+    exit 1
+fi

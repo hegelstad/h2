@@ -47,6 +47,7 @@ func newBridgeDaemonCmd() *cobra.Command {
 			if bc.Telegram != nil {
 				allowedCommands = bc.Telegram.AllowedCommands
 				opts.ExpectsResponse = bc.Telegram.ExpectsResponse
+				opts.MirrorTarget = bc.Telegram.MirrorTarget
 			}
 
 			svc := bridgeservice.New(bridges, bridgeName, concierge, pod, socketdir.Dir(), allowedCommands, opts)

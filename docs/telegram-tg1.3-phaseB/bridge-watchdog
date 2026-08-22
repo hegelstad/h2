@@ -1,0 +1,94 @@
+#!/bin/bash
+# bridge-watchdog: restarts the h2 telegram bridge if it dies OR if it is alive
+# but cannot reach Telegram, and alerts via the Telegram Bot API directly (does
+# not depend on the bridge being up).
+#
+# Installed 2026-07-18 after the bridge sat dead for 8 days (Jul 10-18) with no
+# supervision. Runs from cron every 2 minutes.
+#
+# 2026-08-20: hardened after a "process alive but 404 on every send" outage.
+# The bridge stayed up but sent an empty bot token in the URL path (config
+# ${VAR} expansion was not applied), so every Telegram call returned 404 and
+# the old liveness-only check saw it as healthy. We now also treat recent
+# "API error: Not Found" lines in bridge.log as a down signal (readiness, not
+# just liveness).
+
+export H2_DIR=/home/ubuntu/h2home
+H2=/home/ubuntu/go/bin/h2
+LOG=/home/ubuntu/h2home/logs/bridge-watchdog.log
+BRIDGE_LOG=/home/ubuntu/h2home/logs/bridge.log
+# shellcheck source=/home/ubuntu/h2home/bin/telegram-env.sh
+. /home/ubuntu/h2home/bin/telegram-env.sh
+BOT_TOKEN="$TELEGRAM_BOT_TOKEN"
+CHAT_ID="$TELEGRAM_CHAT_ID"
+
+bridge_alive() {
+    pgrep -f 'h2 _bridge-service --bridge telegram' >/dev/null
+}
+
+# Unhealthy if the bridge logged a Telegram "API error: Not Found" event within
+# the last 3 minutes. We parse the timestamp of the last such log line (not the
+# file mtime) so a healthy-but-quiet bridge does not keep tripping on an old
+# error still sitting in the log tail — the event simply ages out after 3 min.
+# A broken bridge re-emits these continuously, so it stays flagged.
+bridge_healthy() {
+    [ -f "$BRIDGE_LOG" ] || return 0
+    local last_404 datepart timepart epoch now
+    last_404=$(tail -n 400 "$BRIDGE_LOG" 2>/dev/null | grep "API error: Not Found" | tail -n 1)
+    [ -z "$last_404" ] && return 0
+    # Log lines start with "YYYY/MM/DD HH:MM:SS bridge: ..."
+    datepart=$(printf '%s' "$last_404" | awk '{print $1}' | tr '/' '-')
+    timepart=$(printf '%s' "$last_404" | awk '{print $2}')
+    epoch=$(date -d "$datepart $timepart" +%s 2>/dev/null) || return 0
+    now=$(date +%s)
+    [ $((now - epoch)) -lt 180 ] && return 1
+    return 0
+}
+
+bridge_up() {
+    bridge_alive && bridge_healthy
+}
+
+# tg1.3 — DO NOT route these alerts through `h2 send telegram`. Both callers
+# below fire only after the bridge was found DOWN and a restart was attempted.
+# The bridge is the transport `h2 send telegram` depends on, so:
+#   - the "restart FAILED" alert must reach the user during a live outage; and
+#   - even the "restart OK" alert fires seconds after the bridge was down and
+#     was just restarted — routing it through that same still-settling bridge is
+#     exactly the chicken-and-egg the bridge-dependency rule forbids.
+# There is no bridge-is-healthy path here (this whole script only runs on a
+# down-bridge event), so BOTH alerts stay on the direct Bot API. Keep it that way.
+alert() {
+    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
+        -d chat_id="${CHAT_ID}" --data-urlencode "text=$1" >/dev/null
+}
+
+bridge_up && exit 0
+
+if bridge_alive; then
+    reason="alive but unreachable (Telegram 404 in bridge.log)"
+else
+    reason="process down"
+fi
+echo "$(date '+%Y-%m-%d %H:%M:%S') bridge $reason, attempting restart" >> "$LOG"
+
+# Record log length so the post-restart check only inspects new lines (old
+# 404 lines from the broken run would otherwise linger in the tail).
+PRELINES=$(wc -l < "$BRIDGE_LOG" 2>/dev/null || echo 0)
+
+# Stop the (possibly wedged) bridge before restarting so we get a fresh process
+# that re-reads config, then re-point it at the concierge session.
+"$H2" bridge stop telegram >> "$LOG" 2>&1 || true
+sleep 2
+"$H2" run concierge --role concierge --detach >> "$LOG" 2>&1 || true
+"$H2" bridge --bridge telegram --set-concierge concierge >> "$LOG" 2>&1
+sleep 6
+
+NEWLINES=$(tail -n +$((PRELINES + 1)) "$BRIDGE_LOG" 2>/dev/null)
+if bridge_alive && ! printf '%s' "$NEWLINES" | grep -q "API error: Not Found"; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S') restart OK" >> "$LOG"
+    alert "h2-broen var nede ($reason) og ble automatisk restartet av bridge-watchdog. Alt oppe igjen."
+else
+    echo "$(date '+%Y-%m-%d %H:%M:%S') restart FAILED" >> "$LOG"
+    alert "h2-broen er NEDE ($reason) og automatisk restart feilet. Logg inn på serveren og sjekk ~/h2home/logs/bridge-watchdog.log"
+fi

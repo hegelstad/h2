@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,6 +48,290 @@ func TestSend(t *testing.T) {
 	}
 	if gotMode != "HTML" {
 		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+}
+
+func TestSend_EscapesAmpersandInsideTaggedHTML(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+	if err := tg.Send(context.Background(), "<b>ok</b> a & b"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if !strings.Contains(gotText, "<b>ok</b>") {
+		t.Errorf("lost bold tags: %q", gotText)
+	}
+	if strings.Contains(gotText, " & ") {
+		t.Errorf("raw ampersand survived: %q", gotText)
+	}
+	if !strings.Contains(gotText, "&amp;") {
+		t.Errorf("text %q missing &amp;", gotText)
+	}
+}
+
+func TestSend_DoesNotDoubleEscapeEntitiesInTaggedHTML(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+	if err := tg.Send(context.Background(), "<b>ok</b> a &amp; b"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if strings.Contains(gotText, "&amp;amp;") {
+		t.Errorf("double-escaped: %q", gotText)
+	}
+	if !strings.Contains(gotText, "&amp;") {
+		t.Errorf("text %q missing preserved &amp;", gotText)
+	}
+	if !strings.Contains(gotText, "<b>ok</b>") {
+		t.Errorf("lost bold tags: %q", gotText)
+	}
+}
+
+func TestSend_EscapesUntaggedSpecials(t *testing.T) {
+	var gotText, gotMode string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		gotText = r.FormValue("text")
+		gotMode = r.FormValue("parse_mode")
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{Token: "TOKEN", ChatID: 42, BaseURL: srv.URL}
+
+	// Stray <, & and > in untagged prose must be entity-escaped so the HTML
+	// parse_mode doesn't reject the message with a 400.
+	if err := tg.Send(context.Background(), "a < b & c > d"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
+	}
+	if strings.ContainsAny(gotText, "<>") || strings.Contains(gotText, " & ") {
+		t.Errorf("text not escaped: %q", gotText)
+	}
+	for _, want := range []string{"&lt;", "&amp;", "&gt;"} {
+		if !strings.Contains(gotText, want) {
+			t.Errorf("text %q missing %q", gotText, want)
+		}
+	}
+}
+
+func TestSend_MirrorsToSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "hello from h2"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 1 {
+		t.Fatalf("mirror called %d times, want 1", len(mirrored))
+	}
+	if want := "[telegram-out] hello from h2"; mirrored[0] != want {
+		t.Errorf("mirror = %q, want %q", mirrored[0], want)
+	}
+}
+
+func TestSend_MirrorFailureDoesNotFailSend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			return fmt.Errorf("mirror sink is down")
+		},
+	}
+
+	// A failing mirror sink must never surface as a send error.
+	if err := tg.Send(context.Background(), "critical alert"); err != nil {
+		t.Fatalf("Send returned error from mirror failure: %v", err)
+	}
+	tg.mirrorWG.Wait()
+}
+
+func TestSend_FailedSendDoesNotMirror(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: false, Description: "bot was blocked"})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "never delivered"); err == nil {
+		t.Fatal("expected send error")
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 0 {
+		t.Errorf("failed send still mirrored %v", mirrored)
+	}
+}
+
+func TestSend_DropsMirrorWhenInFlightCapHit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	old := maxInFlightMirrors
+	maxInFlightMirrors = 1
+	t.Cleanup(func() { maxInFlightMirrors = old })
+
+	release := make(chan struct{})
+	var calls atomic.Int32
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			calls.Add(1)
+			<-release
+			return nil
+		},
+	}
+
+	if err := tg.Send(context.Background(), "first"); err != nil {
+		t.Fatalf("Send first: %v", err)
+	}
+	if err := tg.Send(context.Background(), "second"); err != nil {
+		t.Fatalf("Send second: %v", err)
+	}
+	close(release)
+	tg.mirrorWG.Wait()
+
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("mirror calls = %d, want 1 (second copy dropped at cap)", n)
+	}
+}
+
+func TestSend_SlowMirrorDoesNotBlockSend(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	release := make(chan struct{})
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			<-release
+			return nil
+		},
+	}
+
+	start := time.Now()
+	if err := tg.Send(context.Background(), "urgent"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	elapsed := time.Since(start)
+	close(release)
+	tg.mirrorWG.Wait()
+
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("Send blocked on slow mirror for %s", elapsed)
+	}
+}
+
+func TestStreamClose_MirrorsToSink(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(sendMessageResponse{OK: true})
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var mirrored []string
+	tg := &Telegram{
+		Token:   "TOKEN",
+		ChatID:  42,
+		BaseURL: srv.URL,
+		Mirror: func(text string) error {
+			mu.Lock()
+			mirrored = append(mirrored, text)
+			mu.Unlock()
+			return nil
+		},
+	}
+
+	s, err := tg.OpenStream(context.Background())
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	if _, err := s.Write([]byte("streamed hello")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	tg.mirrorWG.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(mirrored) != 1 {
+		t.Fatalf("mirror called %d times, want 1", len(mirrored))
+	}
+	if want := "[telegram-out] streamed hello"; mirrored[0] != want {
+		t.Errorf("mirror = %q, want %q", mirrored[0], want)
 	}
 }
 
@@ -313,12 +598,92 @@ func TestStartStop_ReplyRouting(t *testing.T) {
 	if len(received) != 1 {
 		t.Fatalf("got %d messages, want 1", len(received))
 	}
-	// Reply to a [researcher] tagged message should route to researcher.
+	// Reply to a [researcher] tagged message should route to researcher
+	// and prepend the quoted original (tag stripped) as reply-context.
 	if received[0].agent != "researcher" {
 		t.Errorf("agent = %q, want %q", received[0].agent, "researcher")
 	}
-	if received[0].body != "what's the status?" {
-		t.Errorf("body = %q, want %q", received[0].body, "what's the status?")
+	wantBody := "[in reply to]\n> here are the results\n\nwhat's the status?"
+	if received[0].body != wantBody {
+		t.Errorf("body = %q, want %q", received[0].body, wantBody)
+	}
+}
+
+func TestWithReplyContext(t *testing.T) {
+	tests := []struct {
+		name     string
+		original string
+		body     string
+		want     string
+	}{
+		{
+			name:     "agent tag stripped and quoted",
+			original: "[researcher] here are the results",
+			body:     "what's the status?",
+			want:     "[in reply to]\n> here are the results\n\nwhat's the status?",
+		},
+		{
+			name:     "h2 envelope stripped",
+			original: "[h2 message from: concierge] build complete",
+			body:     "ship it",
+			want:     "[in reply to]\n> build complete\n\nship it",
+		},
+		{
+			name:     "multiline original blockquoted per line",
+			original: "[coder] line one\nline two",
+			body:     "looks good",
+			want:     "[in reply to]\n> line one\n> line two\n\nlooks good",
+		},
+		{
+			name:     "empty original leaves body unchanged",
+			original: "",
+			body:     "just text",
+			want:     "just text",
+		},
+		{
+			name:     "envelope-only original leaves body unchanged",
+			original: "[researcher]   ",
+			body:     "ping",
+			want:     "ping",
+		},
+		{
+			name:     "no prefix on original",
+			original: "plain bot text",
+			body:     "ack",
+			want:     "[in reply to]\n> plain bot text\n\nack",
+		},
+		{
+			name:     "long original truncated",
+			original: strings.Repeat("x", maxReplyQuoteRunes+100),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("x", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "non-ASCII runes truncated",
+			original: strings.Repeat("ä", maxReplyQuoteRunes+1),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("ä", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "emoji runes truncated",
+			original: strings.Repeat("🙂", maxReplyQuoteRunes+1),
+			body:     "ok",
+			want:     "[in reply to]\n> " + strings.Repeat("🙂", maxReplyQuoteRunes) + "…\n\nok",
+		},
+		{
+			name:     "stacked h2 envelope then agent tag both stripped",
+			original: "[h2 message from: concierge] [researcher] here are the results",
+			body:     "what's the status?",
+			want:     "[in reply to]\n> here are the results\n\nwhat's the status?",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withReplyContext(tt.original, tt.body)
+			if got != tt.want {
+				t.Errorf("withReplyContext(%q, %q) = %q, want %q", tt.original, tt.body, got, tt.want)
+			}
+		})
 	}
 }
 

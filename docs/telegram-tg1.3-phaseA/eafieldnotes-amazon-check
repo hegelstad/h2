@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""
+eafieldnotes-amazon-check
+
+Monthly conversion check toward the Amazon Associates 3-qualifying-sales / 180-day
+deadline (conditional approval 2026-06-07, tag eafieldnotes-20, deadline 2026-12-04).
+
+Queries the eafieldnotes Cloudflare D1 for /go affiliate click stats, computes days
+left to the deadline, and sends a Norwegian HTML summary to the user via Telegram
+(h2 send). Amazon sale data cannot be pulled automatically until PA-API access is
+granted (after 3 qualifying sales), so the message reminds the user to check
+Associates Central manually.
+
+Runs LOCALLY (needs the CF token file + the h2 Telegram bridge); scheduled via
+crontab. Deterministic, no LLM.
+"""
+import json
+import os
+import urllib.request
+from datetime import date, datetime, timezone
+
+H2_CONFIG = os.path.expanduser("~/h2home/config.yaml")
+
+
+def _read_yaml_field(key):
+    try:
+        with open(H2_CONFIG) as f:
+            for line in f:
+                if key in line:
+                    return line.split(":", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+from telegram_env import h2_send_telegram, html_esc
+
+ACCT = "da055fad4fb0133aaa39c38c0e9f4721"
+DBID = "5f05b0b5-f467-48a5-b5dc-04afa572731f"
+SECRETS = "/home/ubuntu/.config/eafieldnotes/cloudflare.env"
+DEADLINE = date(2026, 12, 4)
+LOW_CLICK_THRESHOLD = 50  # clicks in last 30d below this -> nudge for more traffic
+
+ASIN_TITLES = {
+    "1942788290": "The Phoenix Project",
+    "1591398398": "Enterprise Architecture as Strategy",
+    "9401808597": "TOGAF Standard 10th Ed",
+    "1449373321": "Designing Data-Intensive Applications",
+    "1492077542": "The Software Architect Elevator",
+    "1942788819": "Team Topologies",
+    "1492097543": "Building Evolutionary Architectures",
+    "B0DKX4MDRJ": "Mastering TOGAF 10",
+    "B0GTM7YDV3": "EA in the Age of Agentic AI",
+    "180602957X": "Agentic Architectural Patterns",
+}
+
+
+def cf_token():
+    with open(SECRETS) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[len("export "):]
+            if line.startswith("CLOUDFLARE_API_TOKEN="):
+                return line.split("=", 1)[1].strip().strip('"')
+    raise SystemExit("no CLOUDFLARE_API_TOKEN in " + SECRETS)
+
+
+def d1_query(token, sql):
+    req = urllib.request.Request(
+        f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/d1/database/{DBID}/query",
+        data=json.dumps({"sql": sql}).encode(),
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as r:
+        d = json.load(r)
+    if not d.get("success"):
+        raise SystemExit("D1 error: " + json.dumps(d.get("errors")))
+    return d["result"][0]["results"]
+
+
+def send_telegram(html):
+    h2_send_telegram(html)
+
+
+def main():
+    token = cf_token()
+    totals = d1_query(
+        token,
+        "SELECT (SELECT COUNT(*) FROM clicks) AS total, "
+        "(SELECT COUNT(*) FROM clicks WHERE ts >= datetime('now','-30 days')) AS last30",
+    )[0]
+    per_book = d1_query(
+        token,
+        "SELECT asin, COUNT(*) AS n FROM clicks "
+        "WHERE ts >= datetime('now','-30 days') GROUP BY asin ORDER BY n DESC LIMIT 8",
+    )
+
+    total = totals["total"]
+    last30 = totals["last30"]
+    days_left = (DEADLINE - datetime.now(timezone.utc).date()).days
+
+    lines = [
+        "<b>eafieldnotes - Amazon-konvertering (månedssjekk)</b>",
+        "",
+        f"<b>Klikk på bok-lenker (/go):</b> {last30} siste 30 dager · {total} totalt",
+    ]
+    if per_book:
+        lines.append("")
+        lines.append("<b>Per bok (siste 30 dager):</b>")
+        for row in per_book:
+            title = html_esc(ASIN_TITLES.get(row["asin"], row["asin"]))
+            lines.append(f"• {title}: {row['n']}")
+
+    lines.append("")
+    lines.append(f"<b>Frist:</b> {days_left} dager igjen til 4. desember 2026 (må ha 3 kvalifiserende salg, ellers trekkes Associates-kontoen).")
+    lines.append("")
+    lines.append("Sjekk Amazon Associates Central for faktiske salg - de kan ikke hentes automatisk ennå (krever PA-API-tilgang, som først gis etter 3 salg).")
+
+    if last30 < LOW_CLICK_THRESHOLD:
+        lines.append("")
+        lines.append(f"⚠ Lavt klikkvolum ({last30} på 30 dager). Det trengs mer trafikk inn på bok-lenkene for å nå 3 salg før fristen - prioritér innhold/Reddit/SEO.")
+
+    send_telegram("\n".join(lines))
+
+
+if __name__ == "__main__":
+    main()

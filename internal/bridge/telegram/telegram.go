@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,9 @@ const (
 	maxMessageLen = 4096
 	// maxPages is the maximum number of messages to send for a single response.
 	maxPages = 3
+	// maxReplyQuoteRunes caps quoted original text so a long bot message
+	// cannot blow up the inbound body delivered to the agent.
+	maxReplyQuoteRunes = 1500
 )
 
 // Telegram implements bridge.Bridge, bridge.Sender, and bridge.Receiver
@@ -40,11 +44,19 @@ type Telegram struct {
 	// If empty, defaults to "https://api.telegram.org".
 	BaseURL string
 
-	client http.Client
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	offset int64
+	// Mirror, if non-nil, receives a best-effort copy of the full text of
+	// every message successfully sent to the chat (tagged with mirrorTag).
+	// It runs in its own goroutine so a slow or failing sink can never block
+	// or fail the user-facing send; its error is logged and swallowed.
+	Mirror func(text string) error
+
+	client          http.Client
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	mirrorWG        sync.WaitGroup
+	mirrorsInFlight int32
+	mu              sync.Mutex
+	offset          int64
 
 	streamMu sync.Mutex
 }
@@ -53,6 +65,7 @@ func (t *Telegram) Name() string { return "telegram" }
 
 func (t *Telegram) Close() error {
 	t.Stop()
+	t.mirrorWG.Wait()
 	return nil
 }
 
@@ -134,13 +147,51 @@ func (t *Telegram) poll(ctx context.Context, handler bridge.InboundHandler) {
 				continue
 			}
 			agent, body := bridge.ParseAgentPrefix(u.Message.Text)
-			// If no explicit prefix, check reply-to message for agent tag.
-			if agent == "" && u.Message.ReplyToMessage != nil {
-				agent = bridge.ParseAgentTag(u.Message.ReplyToMessage.Text)
+			if u.Message.ReplyToMessage != nil {
+				// If no explicit prefix, route via the replied-to agent tag.
+				if agent == "" {
+					agent = bridge.ParseAgentTag(u.Message.ReplyToMessage.Text)
+				}
+				body = withReplyContext(u.Message.ReplyToMessage.Text, body)
 			}
 			handler(agent, body)
 		}
 	}
+}
+
+// withReplyContext prepends a blockquoted copy of the replied-to message
+// so the receiving agent sees both the new text and what it was a reply to.
+// Leading [h2 message from: ...] / [agent] prefixes are stripped from the
+// quote. Empty originals (or envelope-only originals) leave body unchanged.
+func withReplyContext(original, body string) string {
+	quoted := quoteReplyOriginal(original)
+	if quoted == "" {
+		return body
+	}
+	return "[in reply to]\n" + quoted + "\n\n" + body
+}
+
+func quoteReplyOriginal(original string) string {
+	text := strings.TrimSpace(original)
+	for {
+		next := strings.TrimSpace(bridge.StripH2Envelope(text))
+		if next == text {
+			break
+		}
+		text = next
+	}
+	if text == "" {
+		return ""
+	}
+	runes := []rune(text)
+	if len(runes) > maxReplyQuoteRunes {
+		text = string(runes[:maxReplyQuoteRunes]) + "…"
+	}
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (t *Telegram) execAndReply(ctx context.Context, cmd, args string) {
