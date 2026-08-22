@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""reply-guard-healthcheck: detect silent failure of telegram-reply-guard.
+
+The Stop-hook guard self-alerts on internal failures, but if it is un-registered
+from settings.json it never runs and stays silent forever. This external
+healthcheck closes that gap (intended for cron).
+
+Exit 0 when healthy, 1 when a problem was found.
+RGHC_DRYRUN=1: run all checks/printing but never send Telegram or write rate-limit state.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+from telegram_env import h2_send_telegram, html_esc
+
+# Module-level path constants. Resolved at CALL time, not def time, so that
+# rebinding these (tests, monkeypatching) actually takes effect. Binding them as
+# default arguments silently ignored such overrides and reported a false "OK" —
+# the exact silent-failure mode this healthcheck exists to prevent.
+SETTINGS_PATH = "/home/ubuntu/h2home/claude-config/default/settings.json"
+GUARD_SCRIPT = "/home/ubuntu/h2home/bin/telegram-reply-guard"
+HEALTH_PATH = "/home/ubuntu/h2home/state/telegram-reply-guard-health.json"
+STATE_PATH = "/home/ubuntu/h2home/state/reply-guard-healthcheck-state.json"
+
+ALERT_COOLDOWN = timedelta(hours=12)
+STALE_THRESHOLD = timedelta(hours=48)
+RESOLVE_FAILURE_THRESHOLD = 3
+GUARD_MARKER = "telegram-reply-guard"
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(value: object) -> Optional[datetime]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    s = value.strip()
+    try:
+        # Support trailing Z
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def check_hook_registered(settings_path: Optional[str] = None) -> Optional[str]:
+    """Return a problem string if telegram-reply-guard is not in hooks.Stop, else None."""
+    settings_path = SETTINGS_PATH if settings_path is None else settings_path
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except FileNotFoundError:
+        return f"settings.json missing: {settings_path}"
+    except (OSError, json.JSONDecodeError) as e:
+        return f"cannot read settings.json: {e}"
+
+    stop = (settings.get("hooks") or {}).get("Stop") or []
+    if not isinstance(stop, list):
+        return "hooks.Stop is not a list"
+
+    for entry in stop:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks") or []:
+            if not isinstance(hook, dict):
+                continue
+            cmd = hook.get("command") or ""
+            if isinstance(cmd, str) and GUARD_MARKER in cmd:
+                return None
+    return f"telegram-reply-guard not registered under hooks.Stop in {settings_path}"
+
+
+def check_guard_executable(guard_path: Optional[str] = None) -> Optional[str]:
+    """Return a problem string if guard script is missing or not executable."""
+    guard_path = GUARD_SCRIPT if guard_path is None else guard_path
+    p = Path(guard_path)
+    if not p.is_file():
+        return f"guard script missing: {guard_path}"
+    if not os.access(guard_path, os.X_OK):
+        return f"guard script not executable: {guard_path}"
+    return None
+
+
+def check_health_freshness(health_path: Optional[str] = None, now: Optional[datetime] = None) -> Optional[str]:
+    """Return a problem string if health file is stale or has too many resolve failures."""
+    health_path = HEALTH_PATH if health_path is None else health_path
+    now = now or _now()
+    try:
+        with open(health_path) as f:
+            health = json.load(f)
+    except FileNotFoundError:
+        return f"health file missing: {health_path}"
+    except (OSError, json.JSONDecodeError) as e:
+        return f"cannot read health file: {e}"
+
+    if not isinstance(health, dict):
+        return "health file is not a JSON object"
+
+    fails = health.get("consecutive_resolve_failures", 0)
+    try:
+        fails_n = int(fails)
+    except (TypeError, ValueError):
+        fails_n = 0
+    if fails_n >= RESOLVE_FAILURE_THRESHOLD:
+        return f"consecutive_resolve_failures={fails_n} (>= {RESOLVE_FAILURE_THRESHOLD})"
+
+    last_ok = _parse_iso(health.get("last_ok"))
+    if last_ok is None:
+        return "last_ok missing or unparseable"
+    age = now - last_ok
+    if age > STALE_THRESHOLD:
+        hours = age.total_seconds() / 3600.0
+        return f"last_ok stale ({hours:.1f}h ago, threshold {STALE_THRESHOLD.total_seconds()/3600:.0f}h)"
+    return None
+
+
+def collect_problems(
+    settings_path: Optional[str] = None,
+    guard_path: Optional[str] = None,
+    health_path: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> list[str]:
+    problems: list[str] = []
+    for check in (
+        check_hook_registered(settings_path),
+        check_guard_executable(guard_path),
+        check_health_freshness(health_path, now=now),
+    ):
+        if check:
+            problems.append(check)
+    return problems
+
+
+def _read_state(state_path: str) -> dict:
+    try:
+        with open(state_path) as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_state(state_path: str, state: dict) -> None:
+    parent = os.path.dirname(state_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    tmp = state_path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, state_path)
+
+
+def should_send_alert(state_path: Optional[str] = None, now: Optional[datetime] = None) -> bool:
+    """True if last alert was more than ALERT_COOLDOWN ago (or never)."""
+    state_path = STATE_PATH if state_path is None else state_path
+    now = now or _now()
+    state = _read_state(state_path)
+    last = _parse_iso(state.get("last_alert"))
+    if last is None:
+        return True
+    return (now - last) >= ALERT_COOLDOWN
+
+
+def send_telegram(text: str) -> None:
+    """Deliver via the h2 Telegram bridge (tg1.3 choke point). Raises on failure.
+
+    This healthcheck watches telegram-reply-guard, which is a Stop hook — a
+    different component from the bridge that h2 send routes through — so there is
+    no chicken-and-egg here: a broken reply-guard does not impair h2 send.
+    """
+    h2_send_telegram(text)
+
+
+def maybe_alert(
+    problems: list[str],
+    state_path: Optional[str] = None,
+    dry_run: bool = False,
+    now: Optional[datetime] = None,
+    send_fn=None,
+) -> bool:
+    """Send rate-limited alert if problems exist. Returns True if alert was sent (or would be in dry-run sense: False for dry-run).
+
+    dry_run: never send, never write state.
+    send_fn: injectable for tests (defaults to send_telegram).
+    """
+    if not problems:
+        return False
+    state_path = STATE_PATH if state_path is None else state_path
+    now = now or _now()
+    if not should_send_alert(state_path, now=now):
+        return False
+    if dry_run:
+        return False
+    text = "⚠️ <b>reply-guard-healthcheck PROBLEM:</b>\n" + "\n".join(
+        f"- {html_esc(p)}" for p in problems
+    )
+    (send_fn or send_telegram)(text)
+    state = _read_state(state_path)
+    state["last_alert"] = now.isoformat()
+    state["last_problems"] = problems
+    _write_state(state_path, state)
+    return True
+
+
+def run(
+    settings_path: Optional[str] = None,
+    guard_path: Optional[str] = None,
+    health_path: Optional[str] = None,
+    state_path: Optional[str] = None,
+    dry_run: Optional[bool] = None,
+    now: Optional[datetime] = None,
+    send_fn=None,
+) -> int:
+    """Run checks, print one-line summary, optionally alert. Return exit code."""
+    if dry_run is None:
+        dry_run = os.environ.get("RGHC_DRYRUN", "") == "1"
+    now = now or _now()
+    problems = collect_problems(
+        settings_path=settings_path,
+        guard_path=guard_path,
+        health_path=health_path,
+        now=now,
+    )
+    if problems:
+        summary = "PROBLEM: " + "; ".join(problems)
+        print(summary)
+        maybe_alert(problems, state_path=state_path, dry_run=dry_run, now=now, send_fn=send_fn)
+        return 1
+    print("OK: telegram-reply-guard registered, executable, and health fresh")
+    return 0
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    return run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

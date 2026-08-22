@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""telegram-reply-guard: Claude Code Stop hook that guarantees Telegram replies.
+
+h2 has no automatic output relay from agent to bridge: a Telegram-originated
+message only gets a reply if the agent explicitly runs `h2 send telegram ...`.
+This hook closes that gap mechanically. When a turn was triggered by a
+Telegram message and the agent ended the turn without any outbound telegram
+send, the final assistant text is forwarded via `h2 send telegram`.
+
+Installed 2026-07-19 after repeated silent-reply incidents.
+Hardened 2026-07-26: the first version depended on the hook payload's
+transcript_path resolving to an existing file. It often does not (renamed or
+cleaned-up session files), so the guard failed on *every* invocation for five
+days without anyone noticing. Two changes:
+  1. Transcript resolution falls back to the newest recently-written .jsonl in
+     the same project directory.
+  2. Unresolvable transcripts raise a rate-limited direct-to-Bot-API alert, so
+     a broken safety net can never again be silent.
+
+Runs as an extra command on the existing Stop hook. Always exits 0 — a guard
+failure must never block the agent.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+from telegram_env import load_telegram_creds
+
+LOG = "/home/ubuntu/h2home/logs/telegram-reply-guard.log"
+HEALTH = "/home/ubuntu/h2home/state/telegram-reply-guard-health.json"
+TELEGRAM_TAG = "[h2 message from: telegram]"
+MAX_LEN = 3800  # under Telegram's 4096 hard limit
+FALLBACK_MAX_AGE = 900  # seconds: how recent a .jsonl must be to stand in
+ALERT_COOLDOWN = 12 * 3600  # seconds between "guard is broken" alerts
+
+BOT_TOKEN, CHAT_ID = load_telegram_creds()
+
+
+def log(msg: str) -> None:
+    try:
+        with open(LOG, "a") as f:
+            f.write(f"[{datetime.now(timezone.utc).isoformat()}] {msg}\n")
+    except OSError:
+        pass
+
+
+def read_health() -> dict:
+    try:
+        with open(HEALTH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def write_health(**fields) -> None:
+    state = read_health()
+    state.update(fields)
+    try:
+        tmp = HEALTH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, HEALTH)
+    except OSError:
+        pass
+
+
+def alert(msg: str) -> None:
+    """Direct Bot API alert, bypassing h2 entirely — used when the guard itself
+    is degraded and h2's own path cannot be trusted. Rate-limited."""
+    state = read_health()
+    now = time.time()
+    if now - state.get("last_alert_ts", 0) < ALERT_COOLDOWN:
+        return
+    try:
+        # tg1.3 — DO NOT convert this to `h2 send telegram`. Two reasons:
+        # (1) recursion: this guard scans agent Stop-hook transcripts for the
+        #     string "h2 send telegram" (see main()); if its own degradation
+        #     alert went out that way it could feed its own watcher.
+        # (2) independence: this alert fires precisely when h2's reply path is
+        #     already suspect, so it must bypass h2 and hit the Bot API directly.
+        # The normal reply forward below (main, via subprocess `h2 send telegram`)
+        # is the intended h2 path; only this degradation alert stays direct.
+        data = urllib.parse.urlencode({"chat_id": CHAT_ID, "text": msg}).encode()
+        urllib.request.urlopen(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data=data, timeout=15
+        ).read()
+        write_health(last_alert_ts=now)
+        log(f"sent degradation alert: {msg}")
+    except Exception as e:
+        log(f"alert failed: {e}")
+
+
+def resolve_transcript(path: str) -> str:
+    """Return a readable transcript path, or "" if none can be found.
+
+    The hook payload's transcript_path is authoritative when it exists. When it
+    does not, fall back to the newest .jsonl in the same directory that was
+    written within FALLBACK_MAX_AGE — for a Stop hook that is, by construction,
+    the transcript of the turn that just ended.
+    """
+    if path and os.path.isfile(path):
+        return path
+    if not path:
+        return ""
+    parent = Path(path).parent
+    if not parent.is_dir():
+        return ""
+    now = time.time()
+    candidates = [
+        p for p in parent.glob("*.jsonl")
+        if now - p.stat().st_mtime <= FALLBACK_MAX_AGE
+    ]
+    if not candidates:
+        return ""
+    best = max(candidates, key=lambda p: p.stat().st_mtime)
+    log(f"transcript_path {path} missing; fell back to {best}")
+    return str(best)
+
+
+def text_blocks(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return ""
+
+
+def has_tool_result(content) -> bool:
+    return isinstance(content, list) and any(
+        isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+    )
+
+
+def main() -> None:
+    try:
+        payload = json.load(sys.stdin)
+    except Exception as e:
+        log(f"bad hook payload: {e}")
+        return
+    raw_path = payload.get("transcript_path", "")
+    if not raw_path:
+        log("no transcript_path in payload")
+        return
+
+    transcript_path = resolve_transcript(raw_path)
+    if not transcript_path:
+        log(f"cannot resolve transcript for {raw_path}")
+        fails = read_health().get("consecutive_resolve_failures", 0) + 1
+        write_health(consecutive_resolve_failures=fails,
+                     last_failure=datetime.now(timezone.utc).isoformat())
+        if fails >= 3:
+            alert(
+                "⚠️ telegram-reply-guard kan ikke lese transkriptet "
+                f"({fails} forsøk på rad). Svar på Telegram er IKKE garantert "
+                "før dette er fikset — se logs/telegram-reply-guard.log."
+            )
+        return
+
+    try:
+        with open(transcript_path) as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+    except Exception as e:
+        log(f"cannot read transcript {transcript_path}: {e}")
+        return
+
+    write_health(consecutive_resolve_failures=0,
+                 last_ok=datetime.now(timezone.utc).isoformat())
+
+    # Find the last real user prompt (not tool results, not meta).
+    last_user_idx = None
+    for i, e in enumerate(entries):
+        if e.get("type") != "user" or e.get("isMeta"):
+            continue
+        content = e.get("message", {}).get("content")
+        if has_tool_result(content):
+            continue
+        if text_blocks(content).strip():
+            last_user_idx = i
+    if last_user_idx is None:
+        return
+
+    prompt = text_blocks(entries[last_user_idx].get("message", {}).get("content"))
+    if TELEGRAM_TAG not in prompt:
+        return  # turn not triggered from Telegram — nothing to guarantee
+
+    # Did the turn already send anything to the telegram bridge?
+    final_text = ""
+    for e in entries[last_user_idx + 1:]:
+        if e.get("type") != "assistant":
+            continue
+        content = e.get("message", {}).get("content", [])
+        if isinstance(content, list):
+            for b in content:
+                if (
+                    isinstance(b, dict)
+                    and b.get("type") == "tool_use"
+                    and b.get("name") == "Bash"
+                    and "h2 send telegram" in str(b.get("input", {}).get("command", ""))
+                ):
+                    log("turn already sent to telegram — guard pass")
+                    write_health(last_pass=datetime.now(timezone.utc).isoformat())
+                    return
+        t = text_blocks(content).strip()
+        if t:
+            final_text = t
+
+    if not final_text:
+        log("telegram turn ended with no reply AND no final text — nothing to forward")
+        return
+
+    if len(final_text) > MAX_LEN:
+        final_text = final_text[:MAX_LEN] + "\n[…forkortet]"
+
+    if os.environ.get("H2_REPLY_GUARD_DRYRUN"):
+        print(f"DRYRUN would send ({len(final_text)} chars): {final_text[:300]}")
+        return
+
+    try:
+        subprocess.run(
+            ["h2", "send", "telegram", final_text],
+            check=True, capture_output=True, timeout=30,
+        )
+        log(f"forwarded final text to telegram ({len(final_text)} chars)")
+        write_health(last_forward=datetime.now(timezone.utc).isoformat())
+    except Exception as e:
+        log(f"forward failed: {e}")
+        alert(f"⚠️ telegram-reply-guard klarte ikke å videresende svaret: {e}")
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit(0)

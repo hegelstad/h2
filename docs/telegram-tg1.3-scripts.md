@@ -40,3 +40,32 @@ Helper added: `telegram_env.py` now exports `h2_send_telegram`, `html_esc`,
 
 `h2 send telegram` is the choke point: the bridge (tg1.1) applies `parse_mode=HTML`
 and mirrors `[telegram-out]` to concierge. Scripts no longer set `parse_mode`.
+
+---
+
+# tg1.3 Phase B — recovery/self-heal surface
+
+Date: 2026-08-22
+Agent: claude coder-1
+Branch: `feat/telegram-routing`
+Snapshots: `docs/telegram-tg1.3-phaseB/`.
+
+These 7 are the self-heal / recovery surface. Treatment follows the
+**bridge-dependency rule**: a script's failure/alert must never depend on the
+very component it is recovering. Concierge approved the split below on
+2026-08-22 (failure alerts stay direct Bot API; informational "component is up"
+alerts route through the bridge). Verification is **static only** — no live sends.
+
+| script | old mechanism -> new | kept direct POST? why | how static-verified |
+|---|---|---|---|
+| `bridge-watchdog` | direct `api.telegram.org/sendMessage` (both alerts) -> **unchanged** | **YES, both alerts.** The script only runs on a down-bridge event; the "restart FAILED" alert must fire during a live outage, and even the "restart OK" alert fires seconds after the bridge was down + just restarted, so routing it through that same still-settling bridge is the exact chicken-and-egg the rule forbids. No bridge-is-healthy path exists here. Added a comment block at `alert()` so no future agent converts it. | `bash -n`; body byte-identical to backup apart from the comment block |
+| `concierge-restart-resume.sh` | direct POST (3 alerts) -> **split**: 2 pod-up (success/marker-stuck) alerts to `h2 send telegram --file` + HTML (`<b>`/`<code>`); 1 "concierge did not come up" alert kept direct | **YES, the "did not come up" failure alert.** May coincide with a compound bridge+concierge outage → must bypass the path it is recovering. Success alerts are only reached after the daemon is confirmed running (bridge is never stopped, only re-pointed), so they route through the bridge for HTML + concierge mirror. | `bash -n`; `grep api.telegram.org` = exactly 1 (the failure `alert()`); no `parse_mode` |
+| `concierge-redeploy.sh` | single trailing direct POST (MSG chosen by if/else) -> **split**: success branch to `h2 send telegram --file` + HTML; failure branch kept direct | **YES, the verification-failed branch.** Possible compound outage → independence. Bridge is never stopped (only re-pointed), so on success both pod+bridge are confirmed up and the confirmation routes through the bridge. | `bash -n`; `grep api.telegram.org` = exactly 1 (failure branch); `send telegram --file` present in success branch; no `parse_mode` |
+| `reply-guard-healthcheck` | direct `urllib` `sendMessage` -> `h2_send_telegram` (via `send_telegram()` wrapper; kept for test `send_fn` injection) | **NO.** It watches `telegram-reply-guard` (a Stop hook), a *different* component from the bridge `h2 send` routes through — no chicken-and-egg. Problem strings now `html_esc`'d; header wrapped in `<b>`. | `py_compile`; 19/19 unit tests pass (inject `send_fn`, unaffected); no `api.telegram.org`; no `parse_mode` |
+| `health-nuisance-alert` | direct `urllib` `sendMessage` + `parse_mode=HTML` -> `h2_send_telegram` | **NO.** Pure health notifier, unrelated to the messaging surface. `build_message()` already emits HTML; `place`/`art` now `html_esc`'d. | `py_compile`; `--selftest` OK; no `api.telegram.org`; no `parse_mode` set |
+| `pulse-meta-agent` | direct `urllib` `sendMessage` + `parse_mode=HTML` -> `h2_send_telegram` | **NO.** Monthly calibration report, unrelated to recovery. **Bug fixed:** dynamic values (bot UA samples, Claude free-text output, error strings, threshold dicts) were interpolated into a `parse_mode=HTML` body **unescaped** — a UA/summary containing `<`/`&`/`>` could break the markup or drop the message. All such values are now `html_esc`'d at interpolation. | `py_compile`; `--dry-run` renders; no `api.telegram.org`; no `parse_mode` set |
+| `telegram-reply-guard` | direct `urllib` `sendMessage` (degradation `alert()`) -> **unchanged (comment only)** | **YES.** (1) Recursion: it scans agent Stop-hook transcripts for the literal `h2 send telegram`; routing its own alert that way could feed its own watcher. (2) Independence: the alert fires precisely when h2's reply path is already suspect. Added an explanatory comment at the POST site (`alert()`) so no future agent "fixes" it. The normal reply *forward* (in `main`) still uses `h2 send telegram` — that is the intended h2 path and was already so. | `py_compile`; body byte-identical to backup apart from the comment block |
+
+Kept-direct Bot API POSTs after Phase B (intentional, each documented above):
+`bridge-watchdog` (both alerts), `concierge-restart-resume.sh` (failure alert),
+`concierge-redeploy.sh` (failure branch), `telegram-reply-guard` (degradation alert).
