@@ -75,23 +75,38 @@ func TestNameCommand(t *testing.T) {
 	}
 }
 
-func TestBuildCommandArgs_FreshModelAndSession(t *testing.T) {
+func TestBuildCommandArgs_FreshOmitsH2SessionID(t *testing.T) {
+	// h2's SessionID (a UUID) must never reach opencode's -s, which only loads
+	// opencode-minted ses_… ids. A fresh launch passes model only.
 	rc := isolatedRC(t)
 	h := New(rc, nil)
 	args := h.BuildCommandArgs([]string{"--prepend"}, []string{"--extra"})
-	want := []string{"--prepend", "--extra", "-s", "sess-1", "-m", DefaultModel}
+	want := []string{"--prepend", "--extra", "-m", DefaultModel}
 	if strings.Join(args, " ") != strings.Join(want, " ") {
 		t.Errorf("args = %v, want %v", args, want)
 	}
 }
 
-func TestBuildCommandArgs_Resume(t *testing.T) {
+func TestBuildCommandArgs_ResumeOpencodeID(t *testing.T) {
 	rc := isolatedRC(t)
-	rc.ResumeSessionID = "old-sess"
+	rc.ResumeSessionID = "ses_abc123"
 	h := New(rc, nil)
 	args := h.BuildCommandArgs(nil, nil)
-	if len(args) != 2 || args[0] != "-s" || args[1] != "old-sess" {
-		t.Errorf("resume args = %v", args)
+	if len(args) != 2 || args[0] != "-s" || args[1] != "ses_abc123" {
+		t.Errorf("resume args = %v, want [-s ses_abc123]", args)
+	}
+}
+
+func TestBuildCommandArgs_ResumeForeignIDIgnored(t *testing.T) {
+	// A stale h2 UUID in ResumeSessionID must be ignored (start fresh) rather
+	// than crash-loop opencode with "Invalid session ID".
+	rc := isolatedRC(t)
+	rc.ResumeSessionID = "d9a3cf09-7d67-4a13-a947-cad7824cb528"
+	h := New(rc, nil)
+	args := h.BuildCommandArgs(nil, nil)
+	want := []string{"-m", DefaultModel}
+	if strings.Join(args, " ") != strings.Join(want, " ") {
+		t.Errorf("args = %v, want %v (foreign resume id must be dropped)", args, want)
 	}
 }
 

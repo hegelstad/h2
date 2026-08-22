@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -244,6 +245,50 @@ func TestHandleHook_EventFlag_OpencodeIdle(t *testing.T) {
 	}
 	if stdout.String() != "{}\n" {
 		t.Errorf("stdout = %q", stdout.String())
+	}
+}
+
+// blockingReader never returns data or EOF, simulating an inherited live TTY.
+// Any Read blocks until the test's cleanup unblocks it.
+type blockingReader struct{ done chan struct{} }
+
+func (b *blockingReader) Read(p []byte) (int, error) {
+	<-b.done
+	return 0, io.EOF
+}
+
+// TestHandleHook_EventFlag_SkipsStdin is the regression test for the opencode
+// plugin hang: when --event is set the command must NOT read stdin. If it does,
+// an inherited live TTY (modeled here by blockingReader) blocks io.ReadAll
+// forever, the hook never forwards, and the process leaks. With the fix, the
+// event is forwarded and the command returns without touching stdin.
+func TestHandleHook_EventFlag_SkipsStdin(t *testing.T) {
+	tmpDir := shortHookTempDir(t)
+	agent := setupMockAgent(t, tmpDir, "oc-agent-tty")
+
+	br := &blockingReader{done: make(chan struct{})}
+	t.Cleanup(func() { close(br.done) })
+
+	cmd := newHandleHookCmd()
+	cmd.SetArgs([]string{"--agent", "oc-agent-tty", "--event", "opencode.session.idle"})
+	cmd.SetIn(br)
+	cmd.SetOut(&bytes.Buffer{})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- cmd.Execute() }()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handle-hook blocked reading stdin with --event set (regression)")
+	}
+
+	reqs := agent.Received()
+	if len(reqs) != 1 || reqs[0].EventName != "opencode.session.idle" {
+		t.Fatalf("expected 1 forwarded idle event, got %+v", reqs)
 	}
 }
 

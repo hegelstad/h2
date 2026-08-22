@@ -45,13 +45,19 @@ Exits 0 with JSON on stdout.`,
 				return fmt.Errorf("--agent is required (or set H2_ACTOR)")
 			}
 
-			data, err := io.ReadAll(cmd.InOrStdin())
-			if err != nil {
-				return fmt.Errorf("read stdin: %w", err)
-			}
-
+			// Only read stdin on the Claude Code / Grok path, where the event
+			// name and payload arrive as JSON on stdin. When --event is set
+			// (opencode plugins) stdin is unused and is frequently the agent's
+			// live TTY; an unconditional io.ReadAll there blocks forever waiting
+			// for EOF, so the hook never forwards and the process leaks.
+			var data []byte
 			eventName := eventFlag
 			if eventName == "" {
+				d, err := io.ReadAll(cmd.InOrStdin())
+				if err != nil {
+					return fmt.Errorf("read stdin: %w", err)
+				}
+				data = d
 				if len(bytes.TrimSpace(data)) == 0 {
 					return fmt.Errorf("hook event name not found (pass --event or hook_event_name in JSON)")
 				}

@@ -68,20 +68,35 @@ func (h *OpencodeHarness) DisplayCommand() string { return "opencode" }
 func (h *OpencodeHarness) SupportsResume() bool   { return true }
 
 // BuildCommandArgs maps RuntimeConfig to opencode CLI flags.
+//
+// opencode's -s flag *loads an existing opencode session* and rejects any id
+// it did not mint ("Error: Invalid session ID" → exit 1). h2's SessionID is a
+// UUID h2 owns (accepted by claude/grok via --session-id), so it must never be
+// handed to opencode. On a fresh launch we pass no session flag and let
+// opencode mint its own ses_… id (captured back into HarnessSessionID via the
+// plugin for later resume). We only emit -s when we actually hold an
+// opencode-format resume id.
 func (h *OpencodeHarness) BuildCommandArgs(prependArgs, extraArgs []string) []string {
 	var roleArgs []string
 	rc := h.rc
-	if rc.ResumeSessionID != "" {
-		roleArgs = append(roleArgs, "-s", rc.ResumeSessionID)
+	if sid := opencodeSessionID(rc.ResumeSessionID); sid != "" {
+		roleArgs = append(roleArgs, "-s", sid)
 		return harness.CombineArgs(prependArgs, extraArgs, roleArgs)
-	}
-	if rc.SessionID != "" {
-		roleArgs = append(roleArgs, "-s", rc.SessionID)
 	}
 	if model := h.resolvedModel(); model != "" {
 		roleArgs = append(roleArgs, "-m", model)
 	}
 	return harness.CombineArgs(prependArgs, extraArgs, roleArgs)
+}
+
+// opencodeSessionID returns id only when it is a real opencode session id
+// (ses_…). Foreign ids (h2 UUIDs) return "" so we start a fresh session
+// instead of crash-looping on an "Invalid session ID" exit.
+func opencodeSessionID(id string) string {
+	if strings.HasPrefix(strings.TrimSpace(id), "ses_") {
+		return strings.TrimSpace(id)
+	}
+	return ""
 }
 
 // BuildCommandEnvVars isolates opencode config + data under the harness dir
