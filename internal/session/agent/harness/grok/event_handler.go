@@ -93,16 +93,24 @@ func (h *EventHandler) ProcessHookEvent(eventName string, payload json.RawMessag
 	// Session filtering mirrors the claude harness: only settle/activate on our
 	// own session's hooks. If no session ID is expected yet, adopt the first
 	// one we see (grok restarts its session ID under the same GROK_HOME; a
-	// fixed expected ID would strand state forever). Once set, foreign-session
-	// hooks are ignored for state emission.
-	if env.SessionID != "" && (h.expectedSessionID == "" || h.expectedSessionID == env.SessionID) {
-		h.resyncExpectedSessionID(env.SessionID, eventName)
+	// fixed expected ID would strand state forever).
+	//
+	// Terminal/session hooks bypass the ignore entirely and force-resync the
+	// expected ID, exactly like claude's isTerminalOrSessionHook path: Stop/
+	// StopCancelled/StopFailure/SessionStart/SessionEnd carry authoritative
+	// lifecycle truth, so a mid-session sessionId change must be adopted and
+	// processed — ignoring it would strand the agent Active forever. Only
+	// non-terminal hooks from a genuinely foreign session are ignored.
+	if isTerminalOrSessionHook(eventName) {
+		if env.SessionID != "" {
+			h.resyncExpectedSessionID(env.SessionID, eventName)
+		}
 	} else if h.shouldIgnoreHookSession(env.SessionID) {
 		log.Printf(
 			"h2: ignoring grok hook %q due to sessionId mismatch: got %q, expected %q",
 			eventName, env.SessionID, h.expectedSessionID,
 		)
-		return true
+		return isKnownHookEvent(eventName)
 	}
 
 	switch eventName {
@@ -267,4 +275,40 @@ func (e grokHookEnvelope) toolName(payload json.RawMessage) string {
 		return fields.ToolName
 	}
 	return fields.Alt
+}
+
+// isTerminalOrSessionHook reports whether eventName carries authoritative
+// session lifecycle truth. These hooks bypass foreign-session filtering and
+// force-resync expectedSessionID (mirrors claude/event_handler.go), so a
+// mid-session sessionId rotation can never strand state.
+func isTerminalOrSessionHook(eventName string) bool {
+	switch eventName {
+	case "session_start", "session_end", "stop", "stop_cancelled", "stop_failure":
+		return true
+	default:
+		return false
+	}
+}
+
+// isKnownHookEvent reports whether eventName is part of grok's documented hook
+// vocabulary that this handler recognizes.
+func isKnownHookEvent(eventName string) bool {
+	switch eventName {
+	case "user_prompt_submit",
+		"pre_tool_use",
+		"post_tool_use",
+		"post_tool_use_failure",
+		"pre_compact",
+		"session_start",
+		"session_end",
+		"stop",
+		"stop_cancelled",
+		"stop_failure",
+		"notification",
+		"subagent_start",
+		"subagent_stop":
+		return true
+	default:
+		return false
+	}
 }

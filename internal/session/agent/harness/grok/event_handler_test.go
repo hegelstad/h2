@@ -317,20 +317,22 @@ func TestProcessHookEvent_TerminalEmitBlocksUnderBackpressure(t *testing.T) {
 }
 
 // TestEventHandler_SetExpectedSessionIDFiltersForeignSessions mirrors claude's
-// behavior: hooks carrying a different non-empty sessionId are ignored (they
-// belong to another concurrent session sharing GROK_HOME).
+// behavior: NON-terminal hooks carrying a different non-empty sessionId are
+// ignored (they belong to another concurrent session sharing GROK_HOME).
+// Terminal/session hooks (stop etc.) do NOT hit this path — they force-resync;
+// see TestProcessHookEvent_TerminalHookResyncsNewSessionID.
 func TestEventHandler_SetExpectedSessionIDFiltersForeignSessions(t *testing.T) {
 	ch := make(chan monitor.AgentEvent, 1)
 	h := NewEventHandler(ch, nil)
 	h.SetExpectedSessionID("mine")
 
-	foreign := json.RawMessage(`{"hookEventName":"stop","sessionId":"theirs","reason":"end_turn"}`)
-	if !h.ProcessHookEvent("stop", foreign) {
-		t.Fatal("foreign-session Stop is still a known event")
+	foreign := json.RawMessage(`{"hookEventName":"pre_tool_use","sessionId":"theirs","toolName":"run_terminal_command"}`)
+	if !h.ProcessHookEvent("pre_tool_use", foreign) {
+		t.Fatal("foreign-session non-terminal hook is still a known event")
 	}
 	select {
 	case ev := <-ch:
-		t.Fatalf("foreign session must not settle our state: %+v", ev)
+		t.Fatalf("foreign session must not affect our state: %+v", ev)
 	default:
 	}
 
@@ -344,5 +346,153 @@ func TestEventHandler_SetExpectedSessionIDFiltersForeignSessions(t *testing.T) {
 	}
 	if sc, ok := ev.Data.(monitor.StateChangeData); ok && sc.State != monitor.StateIdle {
 		t.Fatalf("expected Idle, got %v", sc.State)
+	}
+}
+
+// TestProcessHookEvent_TerminalHookResyncsNewSessionID pins the claude-parity
+// resync behavior: when a TERMINAL/session hook (session_start / stop /
+// stop_cancelled / stop_failure / session_end) arrives with a NEW sessionId,
+// the handler must adopt it and process normally. Ignoring it would strand the
+// agent Active forever the moment grok rotates its session ID mid-session
+// (claude avoids this via isTerminalOrSessionHook; see claude/event_handler.go).
+//
+// The flip side is also pinned: NON-terminal hooks (user_prompt_submit,
+// pre_tool_use, notification) with a foreign sessionId are still ignored —
+// they belong to another concurrent session sharing GROK_HOME.
+func TestProcessHookEvent_TerminalHookResyncsNewSessionID(t *testing.T) {
+	ch := make(chan monitor.AgentEvent, 1)
+	h := NewEventHandler(ch, nil)
+	h.SetExpectedSessionID("first-session")
+
+	// A terminal Stop with a NEW session id must resync AND settle idle.
+	stop := json.RawMessage(`{"hookEventName":"stop","sessionId":"rotated-id","reason":"end_turn"}`)
+	if !h.ProcessHookEvent("stop", stop) {
+		t.Fatal("terminal Stop must be recognized despite sessionId change")
+	}
+	ev, ok := recvTerminal(t, ch)
+	if !ok {
+		t.Fatal("terminal hook with new sessionId was ignored — agent would strand Active forever")
+	}
+	if sc, ok := ev.Data.(monitor.StateChangeData); ok && sc.State != monitor.StateIdle {
+		t.Fatalf("expected Idle after resync, got %v", sc.State)
+	}
+
+	// The resync must stick: subsequent own-session hooks use rotated-id.
+	prompt := json.RawMessage(`{"hookEventName":"user_prompt_submit","sessionId":"rotated-id"}`)
+	if !h.ProcessHookEvent("user_prompt_submit", prompt) {
+		t.Fatal("user_prompt_submit should be recognized")
+	}
+	drained := 0
+	for {
+		select {
+		case <-ch:
+			drained++
+			continue
+		default:
+		}
+		break
+	}
+	if drained == 0 {
+		t.Fatal("post-resync prompt from adopted session should be processed, not ignored")
+	}
+
+	// A non-terminal hook from a genuinely foreign session stays ignored.
+	h.SetExpectedSessionID("rotated-id")
+	foreign := json.RawMessage(`{"hookEventName":"pre_tool_use","sessionId":"other-session","toolName":"run_terminal_command"}`)
+	if !h.ProcessHookEvent("pre_tool_use", foreign) {
+		t.Fatal("foreign pre_tool_use is still a known grok event")
+	}
+	select {
+	case ev := <-ch:
+		t.Fatalf("non-terminal foreign hook must be ignored, got %+v", ev)
+	default:
+	}
+}
+
+// TestProcessHookEvent_NotificationIdlePromptSettles pins the backstop:
+// Notification(matcher idle_prompt) settles to Idle for turns whose end is not
+// reported by Stop/StopCancelled/StopFailure.
+func TestProcessHookEvent_NotificationIdlePromptSettles(t *testing.T) {
+	ch := make(chan monitor.AgentEvent, 1)
+	h := NewEventHandler(ch, nil)
+
+	if !h.ProcessHookEvent("notification", json.RawMessage(`{"hookEventName":"notification","notificationType":"idle_prompt"}`)) {
+		t.Fatal("notification should be recognized")
+	}
+	ev, ok := recvTerminal(t, ch)
+	if !ok {
+		t.Fatal("expected idle from Notification(idle_prompt)")
+	}
+	if sc, ok := ev.Data.(monitor.StateChangeData); ok && sc.State != monitor.StateIdle {
+		t.Fatalf("expected Idle from idle_prompt, got %v", sc.State)
+	}
+
+	// Other notification types must NOT settle (guard against broader fires).
+	ch2 := make(chan monitor.AgentEvent, 1)
+	h2 := NewEventHandler(ch2, nil)
+	if !h2.ProcessHookEvent("notification", json.RawMessage(`{"hookEventName":"notification","notificationType":"permission_prompt"}`)) {
+		t.Fatal("notification should be recognized even when type is filtered out")
+	}
+	select {
+	case ev := <-ch2:
+		t.Fatalf("permission_prompt notification must not settle state, got %+v", ev)
+	default:
+	}
+}
+
+// TestProcessHookEvent_PostToolUseFailure pins the failure path: a failed tool
+// completes the tool record with Success=false and returns to thinking substate
+// (parity with claude's PostToolUseFailure handling).
+func TestProcessHookEvent_PostToolUseFailure(t *testing.T) {
+	ch := make(chan monitor.AgentEvent, 4)
+	h := NewEventHandler(ch, nil)
+
+	if !h.ProcessHookEvent("post_tool_use_failure", json.RawMessage(`{"hookEventName":"post_tool_use_failure","toolName":"search_replace"}`)) {
+		t.Fatal("post_tool_use_failure should be recognized")
+	}
+	var completed *monitor.ToolCompletedData
+	for i := 0; i < 4; i++ {
+		ev, ok := recvTerminal(t, ch)
+		if !ok {
+			break
+		}
+		if tc, ok := ev.Data.(monitor.ToolCompletedData); ok {
+			completed = &tc
+		}
+	}
+	if completed == nil {
+		t.Fatal("expected ToolCompletedData from post_tool_use_failure")
+	}
+	if completed.Success {
+		t.Error("post_tool_use_failure must set Success=false")
+	}
+	if completed.ToolName != "search_replace" {
+		t.Errorf("tool name = %q, want search_replace", completed.ToolName)
+	}
+}
+
+// TestProcessHookEvent_PreCompact pins the compaction substate transition.
+func TestProcessHookEvent_PreCompact(t *testing.T) {
+	ch := make(chan monitor.AgentEvent, 2)
+	h := NewEventHandler(ch, nil)
+
+	if !h.ProcessHookEvent("pre_compact", json.RawMessage(`{"hookEventName":"pre_compact"}`)) {
+		t.Fatal("pre_compact should be recognized")
+	}
+	var last monitor.AgentEvent
+	found := false
+	for i := 0; i < 2; i++ {
+		ev, ok := recvTerminal(t, ch)
+		if !ok {
+			break
+		}
+		last = ev
+		found = true
+	}
+	if !found {
+		t.Fatal("expected events from pre_compact")
+	}
+	if sc, ok := last.Data.(monitor.StateChangeData); ok && sc.SubState != monitor.SubStateCompacting {
+		t.Fatalf("expected compacting substate, got %v", sc.SubState)
 	}
 }
