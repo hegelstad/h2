@@ -38,7 +38,7 @@ func resolveAgentConfig(name string, role *config.Role, pod string, overrides []
 	}
 
 	// Build a minimal RuntimeConfig for harness resolution.
-	minRC := buildRoleRuntimeConfig(role)
+	minRC := buildRoleRuntimeConfig(name, role)
 	h, err := harness.Resolve(minRC, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve harness: %w", err)
