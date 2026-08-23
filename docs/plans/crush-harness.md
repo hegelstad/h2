@@ -97,25 +97,50 @@ turn).
 **Gotcha (max_tokens/402):** Crush's catalog default `max_tokens` for ox-alpha
 is 64000. OpenRouter rejects with HTTP 402 when the credit balance cannot cover
 worst-case cost (*"You requested up to 64000 tokens, but can only afford
-1826"*) — reproduced consistently. Fix verified — pin output tokens in the
-model slots:
+1826"*) — reproduced consistently. Fix verified — declare the model in a
+custom provider entry (`default_max_tokens` is what caps requests) and select
+it explicitly per run:
 
-`$XDG_CONFIG_HOME/crush/crush.json` (**minimal working config**; in the
-harness, large/small `max_tokens` become **role-configurable template vars** —
-see §6.2):
+`$XDG_CONFIG_HOME/crush/crush.json` (**as implemented**; large/small
+`max_tokens` are role/CLI-overridable — see §6.2):
 ```json
 {
   "$schema": "https://charm.land/crush.json",
-  "options": {
-    "global_context_paths": ["/abs/per-agent/CRUSH.md"],
-    "disable_provider_auto_update": true
+  "providers": {
+    "oxalpha": {
+      "type": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "$OPENROUTER_API_KEY",
+      "models": [{
+        "id": "stealth/ox-alpha", "name": "stealth/ox-alpha",
+        "cost_per_1m_in": 0, "cost_per_1m_out": 0,
+        "cost_per_1m_in_cached": 0, "cost_per_1m_out_cached": 0,
+        "context_window": 200000, "default_max_tokens": 4096
+      }]
+    }
   },
   "models": {
-    "large": { "provider": "openrouter", "model": "stealth/ox-alpha", "max_tokens": 4096 },
-    "small": { "provider": "openrouter", "model": "stealth/ox-alpha", "max_tokens": 2048 }
+    "large": { "provider": "oxalpha", "model": "stealth/ox-alpha", "max_tokens": 4096 },
+    "small": { "provider": "oxalpha", "model": "stealth/ox-alpha", "max_tokens": 2048 }
+  },
+  "options": {
+    "data_directory": "/abs/per-agent/data",
+    "global_context_paths": ["/abs/per-agent/CRUSH.md"],
+    "disable_provider_auto_update": true
   }
 }
 ```
+
+**v0.91.0 gotchas (all verified empirically 2026-08-23):**
+- Non-interactive `crush run` **ignores configured models** and silently uses
+  its default preferred model (claude-sonnet via openrouter, catalog
+  max_tokens 64000) unless `-m <provider>/<id>` is passed. The supervisor
+  passes `-m oxalpha/<model>` + `--small-model oxalpha/<model>` on every turn.
+- A custom provider id (`oxalpha`, type `openrouter`) is required: model ids
+  missing from the builtin Catwalk catalog cannot be selected at all.
+- The `Model` def inside `providers.*.models[]` requires id/name/costs/
+  context_window/default_max_tokens (strict schema); `max_tokens` on that
+  level is invalid.
 
 - No provider block needed: `openrouter` is a known provider; auth from
   `OPENROUTER_API_KEY` env (config supports literal `"$VAR"` expansion — never

@@ -129,12 +129,44 @@ exit 0
 	if _, err := runSupervisor(t, Supervisor{
 		CrushBin: filepath.Join(crushBin, "crush"),
 		HookBin:  filepath.Join(hookBin, "h2"),
+		Model:    "stealth/ox-alpha",
 	}, "[header] hello supervisor\r\n"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(echoFile)
 	if !strings.Contains(string(got), "hello supervisor") {
 		t.Errorf("prompt not piped to child stdin, got %q", got)
+	}
+}
+
+// TestSupervisor_ModelFlagsOnRunTurn pins the run-mode model selection: crush
+// v0.91.0 ignores configured models in non-interactive runs unless -m is
+// given, silently falling back to a catalog default (max_tokens 64000 ->
+// OpenRouter 402). The supervisor must pass -m and --small-model pointing at
+// the harness's custom provider entry.
+func TestSupervisor_ModelFlagsOnRunTurn(t *testing.T) {
+	argvFile := filepath.Join(t.TempDir(), "argv.txt")
+	crushBin := buildCrushStub(t, fmt.Sprintf(`
+echo "$*" >> %q
+cat >/dev/null
+exit 0
+`, argvFile))
+	hookBin := writeHookLogger(t, filepath.Join(t.TempDir(), "hooks.log"))
+
+	if _, err := runSupervisor(t, Supervisor{
+		CrushBin: filepath.Join(crushBin, "crush"),
+		HookBin:  filepath.Join(hookBin, "h2"),
+		Model:    "stealth/ox-alpha",
+	}, "[header] hi\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(argvFile)
+	argv := string(got)
+	if !strings.Contains(argv, "-m "+ProviderID+"/stealth/ox-alpha") {
+		t.Errorf("run turn missing -m %s/stealth/ox-alpha: %s", ProviderID, argv)
+	}
+	if !strings.Contains(argv, "--small-model "+ProviderID+"/stealth/ox-alpha") {
+		t.Errorf("run turn missing --small-model: %s", argv)
 	}
 }
 

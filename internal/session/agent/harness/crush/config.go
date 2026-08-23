@@ -77,18 +77,55 @@ func overrideInt(rc *config.RuntimeConfig, key string, def int) int {
 //   - options.global_context_paths points at the agent's CRUSH.md, which
 //     carries the role prompt (crush run has no system-prompt flag).
 //   - disable_provider_auto_update pins behavior across version bumps.
+//
+// renderCrushJSON builds the per-agent crush.json contents.
+//
+// Layout decisions (docs/plans/crush-harness.md §4):
+//   - The agent's model is declared inside a CUSTOM providers entry
+//     ("oxalpha", type openrouter) because v0.91.0 resolves models.large/
+//     small against the PROVIDER CATALOG; ids missing from the catalog
+//     (e.g. stealth models) silently fall back to the default preferred
+//     model with catalog default max_tokens=64000 -> OpenRouter 402 on
+//     thin balances. Verified empirically 2026-08-23.
+//   - default_max_tokens on the model def is what actually caps requests;
+//     models.large/small slots are kept aligned for TUI parity but run-mode
+//     needs the supervisor's -m/--small-model flags to select our model.
+//   - options.data_directory is set as defense-in-depth so even a stray
+//     manual `crush` invocation under this agent's XDG env lands its
+//     cwd-local .crush db in the agent-scoped data dir; the supervisor also
+//     passes --data-dir explicitly on every command.
+//   - options.global_context_paths points at the agent's CRUSH.md, which
+//     carries the role prompt (crush run has no system-prompt flag).
+//   - disable_provider_auto_update pins behavior across version bumps.
 func renderCrushJSON(configDir, dataDir string, large, small int, model string) ([]byte, error) {
 	crushDir := filepath.Join(configDir, "crush")
 	cfg := map[string]any{
 		"$schema": "https://charm.land/crush.json",
+		"providers": map[string]any{
+			ProviderID: map[string]any{
+				"type":     "openrouter",
+				"base_url": "https://openrouter.ai/api/v1",
+				"api_key":  "$OPENROUTER_API_KEY", // literal $VAR expansion by crush; never write the key itself
+				"models": []map[string]any{{
+					"id":                     model,
+					"name":                   model,
+					"cost_per_1m_in":         0,
+					"cost_per_1m_out":        0,
+					"cost_per_1m_in_cached":  0,
+					"cost_per_1m_out_cached": 0,
+					"context_window":         200000,
+					"default_max_tokens":     large,
+				}},
+			},
+		},
 		"models": map[string]any{
 			"large": map[string]any{
-				"provider":   "openrouter",
+				"provider":   ProviderID,
 				"model":      model,
 				"max_tokens": large,
 			},
 			"small": map[string]any{
-				"provider":   "openrouter",
+				"provider":   ProviderID,
 				"model":      model,
 				"max_tokens": small,
 			},
@@ -113,6 +150,12 @@ func renderCrushJSON(configDir, dataDir string, large, small int, model string) 
 // default. The harness honors rc.Model (role agent_model) first: any
 // OpenRouter model id works with no code change ("any model, one field").
 const defaultModelID = "stealth/ox-alpha"
+
+// ProviderID is the custom provider entry the harness writes into each
+// agent's crush.json. A custom id (not "openrouter") avoids collision with
+// the builtin Catwalk catalog, where stealth ids are absent and resolution
+// would silently fall back to claude-sonnet defaults.
+const ProviderID = "oxalpha"
 
 func modelFor(rc *config.RuntimeConfig) string {
 	if rc != nil && rc.Model != "" {

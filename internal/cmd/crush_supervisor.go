@@ -19,6 +19,7 @@ func newCrushSupervisorCmd() *cobra.Command {
 		host          string
 		resumeSession string
 		sessionFile   string
+		model         string
 		turnTimeout   time.Duration
 	)
 
@@ -45,6 +46,7 @@ crush harness as the session's PTY child.`,
 				Host:            host,
 				ResumeSessionID: resumeSession,
 				SessionFile:     sessionFile,
+				Model:           model,
 				TurnTimeout:     turnTimeout,
 			}, os.Stdin, os.Stdout, os.Stderr)
 		},
@@ -54,6 +56,7 @@ crush harness as the session's PTY child.`,
 	cmd.Flags().StringVar(&host, "host", "", "optional --host socket pinned on every crush command")
 	cmd.Flags().StringVar(&resumeSession, "resume-session", "", "resume this crush session id on every turn")
 	cmd.Flags().StringVar(&sessionFile, "session-file", "", "where to persist the captured crush session id")
+	cmd.Flags().StringVar(&model, "model", "", "model id passed as -m/--small-model on every run turn")
 	cmd.Flags().DurationVar(&turnTimeout, "turn-timeout", 0, "kill an in-flight turn after this long (default 30m)")
 
 	return cmd
