@@ -3,29 +3,29 @@
 // Grok Build's flag surface is deliberately Claude-Code-compatible
 // (--permission-mode shares the same mode names; --system-prompt-override and
 // --rules mirror --system-prompt and --append-system-prompt), so config
-// mapping follows the claude harness closely. Telemetry uses output-based
-// idle detection via ptycollector (like the generic harness) — Grok Build
-// has no OTEL/hook integration wired up yet.
+// mapping follows the claude harness closely.
+//
+// Turn-done detection is PURE HOOK-BASED: grok fires Stop (reason=="end_turn"),
+// StopCancelled, StopFailure, SessionStart, etc. via `h2 handle-hook`, exactly
+// mirroring how the claude harness works. No output-silence / screen-content
+// scraping is used.
 package grok
 
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"time"
 
 	"h2/internal/activitylog"
 	"h2/internal/config"
 	"h2/internal/session/agent/harness"
 	"h2/internal/session/agent/monitor"
-	"h2/internal/session/agent/shared/ptycollector"
 )
 
 func init() {
 	harness.Register(harness.HarnessSpec{
 		Names: []string{"grok", "grok_build"},
 		Factory: func(rc *config.RuntimeConfig, log *activitylog.Logger) harness.Harness {
-			return New(rc)
+			return New(rc, log)
 		},
 		DefaultCommand: "grok",
 	})
@@ -33,13 +33,27 @@ func init() {
 
 // GrokHarness implements harness.Harness for the Grok Build CLI.
 type GrokHarness struct {
-	rc        *config.RuntimeConfig
-	collector *ptycollector.Collector // created in PrepareForLaunch()
+	rc           *config.RuntimeConfig
+	activityLog  *activitylog.Logger
+	eventHandler *EventHandler
+
+	// internalCh buffers events from hook callbacks.
+	// Start() forwards these to the external events channel.
+	internalCh chan monitor.AgentEvent
 }
 
 // New creates a GrokHarness.
-func New(rc *config.RuntimeConfig) *GrokHarness {
-	return &GrokHarness{rc: rc}
+func New(rc *config.RuntimeConfig, log *activitylog.Logger) *GrokHarness {
+	if log == nil {
+		log = activitylog.Nop()
+	}
+	ch := make(chan monitor.AgentEvent, 256)
+	return &GrokHarness{
+		rc:           rc,
+		activityLog:  log,
+		internalCh:   ch,
+		eventHandler: NewEventHandler(ch, log),
+	}
 }
 
 // --- Identity ---
@@ -96,74 +110,60 @@ func (h *GrokHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	return nil
 }
 
-// EnsureConfigDir creates the Grok config directory. Unlike Claude, no
-// default settings file is written — Grok Build initialises its own config
-// on first run, and credentials are populated via 'h2 auth grok'.
+// EnsureConfigDir creates the Grok config directory and writes the h2 hooks
+// config so grok fires `h2 handle-hook` for lifecycle events.
 func (h *GrokHarness) EnsureConfigDir(h2Dir string) error {
 	configDir := h.rc.HarnessConfigDir()
 	if configDir == "" {
 		return nil
 	}
-	return os.MkdirAll(configDir, 0o755)
+	return config.EnsureGrokConfigDir(configDir)
 }
 
 // --- Launch ---
 
-// PrepareForLaunch creates the output collector and returns an empty
-// LaunchConfig. The collector is created here (not in Start) so that
-// HandleOutput() works immediately after the child process starts.
+// PrepareForLaunch returns an empty LaunchConfig. Grok is pure hook-based;
+// no output collector or OTEL server is needed.
 func (h *GrokHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, error) {
-	h.collector = ptycollector.New(monitor.IdleThreshold)
 	return harness.LaunchConfig{}, nil
 }
 
 // --- Runtime ---
 
-// Start bridges the output collector's state updates to the events channel.
-// Blocks until ctx is cancelled.
+// Start forwards internal events (emitted by hook callbacks) to the external
+// channel. Blocks until ctx is cancelled.
 func (h *GrokHarness) Start(ctx context.Context, events chan<- monitor.AgentEvent) error {
 	for {
 		select {
-		case su := <-h.collector.StateCh():
+		case ev := <-h.internalCh:
 			select {
-			case events <- monitor.AgentEvent{
-				Type:      monitor.EventStateChange,
-				Timestamp: time.Now(),
-				Data:      monitor.StateChangeData(su),
-			}:
+			case events <- ev:
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil
 			}
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil
 		}
 	}
 }
 
-// HandleHookEvent returns false — the grok harness has no hook integration.
+// HandleHookEvent delegates hook events to the EventHandler. Returns true when
+// the event is recognized as a grok lifecycle hook.
 func (h *GrokHarness) HandleHookEvent(eventName string, payload json.RawMessage) bool {
-	return false
+	return h.eventHandler.ProcessHookEvent(eventName, payload)
 }
 
-// HandleInterrupt forces an immediate idle state update for local Ctrl+C.
+// HandleInterrupt emits an idle transition for a local Ctrl+C / interrupt
+// (which may never surface as StopCancelled if it kills the CLI outright).
 func (h *GrokHarness) HandleInterrupt() bool {
-	if h.collector != nil {
-		h.collector.SignalInterrupt()
-		return true
+	if h.eventHandler != nil {
+		return h.eventHandler.HandleInterrupt()
 	}
 	return false
 }
 
-// HandleOutput feeds the output collector to detect activity/idle transitions.
-func (h *GrokHarness) HandleOutput() {
-	if h.collector != nil {
-		h.collector.SignalOutput()
-	}
-}
+// HandleOutput is a no-op for Grok (state is tracked via hooks, not output).
+func (h *GrokHarness) HandleOutput() {}
 
-// Stop cleans up the output collector.
-func (h *GrokHarness) Stop() {
-	if h.collector != nil {
-		h.collector.Stop()
-	}
-}
+// Stop is a no-op for Grok (no OTEL server or collector to clean up).
+func (h *GrokHarness) Stop() {}
