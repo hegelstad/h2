@@ -19,13 +19,29 @@ import (
 
 const eventsFileName = "events.jsonl"
 
+// DefaultMaxEventFileBytes caps events.jsonl growth. When an append would push
+// the file past this size, the file is rotated: events.jsonl -> events.jsonl.1
+// (overwriting any previous .1). At most two generations ever exist, so the
+// worst-case on-disk footprint is ~2x the cap regardless of how chatty a
+// harness is. This is the hard OOM backstop for the 2026-08-19 incident where
+// a misbehaving harness ballooned events.jsonl to ~100MB and OOM-killed the
+// agent into a crash loop. It is harness-agnostic by design: every event the
+// monitor persists funnels through Append.
+const DefaultMaxEventFileBytes = 16 << 20 // 16 MiB
+
 // EventStore provides append/read access to a JSONL file of AgentEvents.
 type EventStore struct {
-	file *os.File
+	file     *os.File
+	maxBytes int64
 }
 
 // Open creates or opens the events.jsonl file in the given session directory.
 func Open(sessionDir string) (*EventStore, error) {
+	return openWithLimit(sessionDir, DefaultMaxEventFileBytes)
+}
+
+// openWithLimit is Open with a configurable rotation cap (tests).
+func openWithLimit(sessionDir string, maxBytes int64) (*EventStore, error) {
 	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create eventstore dir: %w", err)
 	}
@@ -33,10 +49,13 @@ func Open(sessionDir string) (*EventStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open events file: %w", err)
 	}
-	return &EventStore{file: f}, nil
+	return &EventStore{file: f, maxBytes: maxBytes}, nil
 }
 
 // Append JSON-encodes an AgentEvent and appends it as a single line.
+// Before writing it checks the file size against the rotation cap and rotates
+// if needed; rotation errors are swallowed (best-effort persistence must never
+// block or crash the agent) but the append itself still proceeds.
 func (s *EventStore) Append(event monitor.AgentEvent) error {
 	env := toEnvelope(event)
 	data, err := json.Marshal(env)
@@ -44,8 +63,51 @@ func (s *EventStore) Append(event monitor.AgentEvent) error {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	data = append(data, '\n')
+
+	s.maybeRotate(int64(len(data)))
+
 	_, err = s.file.Write(data)
 	return err
+}
+
+// maybeRotate rotates events.jsonl to events.jsonl.1 when the current file is
+// at/over the cap and the incoming write would grow it further. A single event
+// larger than the cap is still written (to the fresh file) rather than dropped:
+// the cap bounds total growth over time, not individual records.
+func (s *EventStore) maybeRotate(incoming int64) {
+	if s.maxBytes <= 0 {
+		return // disabled
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return // best-effort
+	}
+	if info.Size()+incoming <= s.maxBytes {
+		return
+	}
+	path := s.file.Name()
+	// Replace the old generation, then swap current -> .1 and reopen a fresh
+	// current. Sequence chosen so a crash between steps leaves at most a
+	// duplicated-or-missing rotated file, never a corrupt current file.
+	rotated := path + ".1"
+	os.Remove(rotated)
+	// Close before rename so the fd does not keep writing to the renamed file.
+	if err := s.file.Close(); err != nil {
+		return
+	}
+	if err := os.Rename(path, rotated); err != nil {
+		// Reopen the original so the store keeps working even though we did
+		// not manage to rotate.
+		if f, rerr := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); rerr == nil {
+			s.file = f
+		}
+		return
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return // next Append's marshal/stat path will surface the problem
+	}
+	s.file = f
 }
 
 // Read reads all events from the file and returns them.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -415,5 +417,127 @@ func TestClose(t *testing.T) {
 	// Double close should return an error (file already closed).
 	if err := s.Close(); err == nil {
 		t.Error("expected error on double Close")
+	}
+}
+
+// TestRotation_CapsFileGrowth is the OOM-backstop regression test from the
+// 2026-08-19 incident: a pathological emitter (a harness that signals output
+// many times a second, flooding state_change events) must not be able to grow
+// events.jsonl without bound. With rotation enabled at a small cap, a long
+// burst of appends keeps the on-disk footprint bounded to roughly 2x the cap
+// (current file + one rotated generation), and the store keeps working.
+func TestRotation_CapsFileGrowth(t *testing.T) {
+	dir := t.TempDir()
+	const cap = 4 << 10 // 4 KiB — small so the test stays fast
+	s, err := openWithLimit(dir, cap)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ev := monitor.AgentEvent{
+		Type:      monitor.EventStateChange,
+		Timestamp: time.Now(),
+		Data:      monitor.StateChangeData(monitor.StateUpdate{State: monitor.StateActive}),
+	}
+	payload, err := json.Marshal(toEnvelope(ev))
+	if err != nil {
+		t.Fatalf("marshal probe event: %v", err)
+	}
+	lineLen := int64(len(payload) + 1)
+
+	// Far more bytes than the cap: with no guard this would be unbounded.
+	const bursts = 2000
+	for i := 0; i < bursts; i++ {
+		if err := s.Append(ev); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+
+	total := int64(0)
+	for _, name := range []string{"events.jsonl", "events.jsonl.1"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if info.Size() == 0 {
+			t.Errorf("%s exists but is empty", name)
+		}
+		total += info.Size()
+	}
+
+	// Hard bound: two generations of at most (cap) each. The current file can
+	// hold up to cap bytes and .1 held up to cap bytes when rotated.
+	if total > 2*cap+lineLen {
+		t.Fatalf("total events.jsonl footprint %d bytes exceeds hard bound %d — OOM backstop failed", total, 2*cap+lineLen)
+	}
+	// The rotated generation must exist after this many appends.
+	if _, err := os.Stat(filepath.Join(dir, "events.jsonl.1")); err != nil {
+		t.Fatalf("expected rotated events.jsonl.1 to exist: %v", err)
+	}
+	// The current file must still be valid JSONL readable by Read().
+	events, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read after rotations: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("current events.jsonl empty after rotations")
+	}
+	for _, e := range events {
+		if e.Type != monitor.EventStateChange {
+			t.Errorf("unexpected event type %v in current file", e.Type)
+		}
+	}
+}
+
+// TestRotation_DisabledWithZeroCap pins the escape hatch: maxBytes <= 0 means
+// no rotation (legacy behavior).
+func TestRotation_DisabledWithZeroCap(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openWithLimit(dir, 0)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	ev := monitor.AgentEvent{Type: monitor.EventUserPrompt, Timestamp: time.Now()}
+	for i := 0; i < 100; i++ {
+		if err := s.Append(ev); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "events.jsonl.1")); !os.IsNotExist(err) {
+		t.Fatalf("rotation happened despite disabled cap (err=%v)", err)
+	}
+}
+
+// TestRotation_OversizedSingleEventStillWritten pins that one huge event is
+// not dropped: it goes into the fresh post-rotation file even though it alone
+// exceeds the cap.
+func TestRotation_OversizedSingleEventStillWritten(t *testing.T) {
+	dir := t.TempDir()
+	s, err := openWithLimit(dir, 64)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	big := monitor.AgentEvent{
+		Type:      monitor.EventAgentMessage,
+		Timestamp: time.Now(),
+		Data:      monitor.AgentMessageData{Content: strings.Repeat("x", 512)},
+	}
+	if err := s.Append(big); err != nil {
+		t.Fatalf("Append oversized: %v", err)
+	}
+	events, err := s.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("oversized event lost: got %d events", len(events))
 	}
 }
