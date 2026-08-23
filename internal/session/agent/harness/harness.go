@@ -165,7 +165,7 @@ func (s *PTYInputSender) SendInterrupt() error {
 func Resolve(rc *config.RuntimeConfig, log *activitylog.Logger) (Harness, error) {
 	reg, ok := registry[rc.HarnessType]
 	if !ok {
-		return nil, fmt.Errorf("unknown harness type: %q (supported: claude_code, codex, generic)", rc.HarnessType)
+		return nil, fmt.Errorf("unknown harness type: %q (supported: claude_code, codex, crush, generic)", rc.HarnessType)
 	}
 	if reg.canonicalName == "generic" && rc.Command == "" {
 		return nil, fmt.Errorf("generic harness requires a command")

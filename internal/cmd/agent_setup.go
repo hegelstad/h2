@@ -33,6 +33,8 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetClaudeConfigPathPrefix()
 	case "codex":
 		harnessConfigPathPrefix = role.GetCodexConfigPathPrefix()
+	case "crush":
+		harnessConfigPathPrefix = role.GetCrushConfigPathPrefix()
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,

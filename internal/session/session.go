@@ -30,6 +30,7 @@ import (
 	// Register harness implementations via init().
 	_ "h2/internal/session/agent/harness/claude"
 	_ "h2/internal/session/agent/harness/codex"
+	_ "h2/internal/session/agent/harness/crush"
 	_ "h2/internal/session/agent/harness/generic"
 )
 
