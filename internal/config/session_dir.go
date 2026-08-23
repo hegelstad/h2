@@ -147,6 +147,43 @@ func EnsureClaudeConfigDir(configDir string) error {
 	return nil
 }
 
+// EnsureGrokConfigDir creates the shared Grok config directory (GROK_HOME) and
+// writes the h2 standard hook registrations to <configDir>/hooks/h2.json if it
+// doesn't exist yet. Grok discovers *.json under $GROK_HOME/hooks as
+// always-trusted global-scope hooks (Claude-compatible hooks, grok >= 1.0.4),
+// so this puts grok on the same event-driven turn-done footing as claude:
+// `h2 handle-hook` fires on Stop/StopCancelled/StopFailure/SessionStart/
+// SessionEnd/Notification(idle_prompt)/UserPromptSubmit/PreToolUse and the
+// harness's EventHandler translates them into AgentEvents.
+//
+// All registrations are passive (the handler exits 0 printing "{}"), so the
+// Stop gate never blocks a grok turn. Timeout is 10s — well under Stop's 600s
+// gate default, generous for a local unix-socket dial.
+func EnsureGrokConfigDir(configDir string) error {
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		return fmt.Errorf("create grok config dir: %w", err)
+	}
+
+	hooksDir := filepath.Join(configDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return fmt.Errorf("create grok hooks dir: %w", err)
+	}
+
+	hooksPath := filepath.Join(hooksDir, "h2.json")
+	if _, err := os.Stat(hooksPath); os.IsNotExist(err) {
+		payload := map[string]any{"hooks": buildGrokHooks()}
+		hooksJSON, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal grok hooks: %w", err)
+		}
+		if err := os.WriteFile(hooksPath, hooksJSON, 0o644); err != nil {
+			return fmt.Errorf("write grok hooks: %w", err)
+		}
+	}
+
+	return nil
+}
+
 // hookEntry represents a single hook in the settings.json hooks array.
 type hookEntry struct {
 	Type    string `json:"type"`
@@ -207,6 +244,45 @@ func buildH2Hooks() map[string][]hookMatcher {
 	hooks["PermissionRequest"] = []hookMatcher{{
 		Matcher: "",
 		Hooks:   []hookEntry{permissionHook},
+	}}
+
+	return hooks
+}
+
+// buildGrokHooks builds the Grok hook registrations. Every event uses the
+// unified "h2 handle-hook" command, which forwards the event payload to the
+// agent's session over its unix socket. Event names are grok's PascalCase
+// lifecycle events per the grok hooks spec (~/.grok/docs/user-guide/10-hooks.md).
+func buildGrokHooks() map[string][]hookMatcher {
+	hook := hookEntry{
+		Type:    "command",
+		Command: "h2 handle-hook",
+		Timeout: 10,
+	}
+
+	events := []string{
+		"SessionStart",
+		"SessionEnd",
+		"Stop",
+		"StopCancelled",
+		"StopFailure",
+		"UserPromptSubmit",
+		"PreToolUse",
+	}
+
+	hooks := make(map[string][]hookMatcher)
+	for _, event := range events {
+		hooks[event] = []hookMatcher{{
+			Matcher: "",
+			Hooks:   []hookEntry{hook},
+		}}
+	}
+
+	// Notification only for the idle_prompt backstop: turns whose end is not
+	// reported by Stop/StopCancelled/StopFailure still settle via idle_prompt.
+	hooks["Notification"] = []hookMatcher{{
+		Matcher: "idle_prompt",
+		Hooks:   []hookEntry{hook},
 	}}
 
 	return hooks

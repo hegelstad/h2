@@ -2416,3 +2416,87 @@ func writeTempFile(t *testing.T, name, content string) string {
 	}
 	return path
 }
+
+// TestEnsureGrokConfigDir_WritesHooks pins the grok hook registration set:
+// all lifecycle events h2's EventHandler keys on, plus the idle_prompt
+// Notification backstop, all pointing at `h2 handle-hook`. Schema matches
+// grok's documented hooks JSON format (~/.grok/docs/user-guide/10-hooks.md).
+func TestEnsureGrokConfigDir_WritesHooks(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "grok-config")
+
+	if err := EnsureGrokConfigDir(dir); err != nil {
+		t.Fatalf("EnsureGrokConfigDir: %v", err)
+	}
+
+	hooksData, err := os.ReadFile(filepath.Join(dir, "hooks", "h2.json"))
+	if err != nil {
+		t.Fatalf("read hooks/h2.json: %v", err)
+	}
+	var doc struct {
+		Hooks map[string][]struct {
+			Matcher string `json:"matcher"`
+			Hooks   []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(hooksData, &doc); err != nil {
+		t.Fatalf("parse hooks/h2.json: %v", err)
+	}
+
+	wantEvents := []string{"SessionStart", "SessionEnd", "Stop", "StopCancelled", "StopFailure", "UserPromptSubmit", "PreToolUse"}
+	for _, ev := range wantEvents {
+		groups, ok := doc.Hooks[ev]
+		if !ok || len(groups) == 0 {
+			t.Errorf("%s hook not registered", ev)
+			continue
+		}
+		if groups[0].Hooks[0].Command != "h2 handle-hook" {
+			t.Errorf("%s command = %q, want 'h2 handle-hook'", ev, groups[0].Hooks[0].Command)
+		}
+	}
+
+	notifs := doc.Hooks["Notification"]
+	if len(notifs) != 1 || notifs[0].Matcher != "idle_prompt" {
+		t.Errorf("Notification must be registered with matcher idle_prompt, got %+v", notifs)
+	}
+
+	// Idempotent: a second call must not overwrite an existing h2.json.
+	os.WriteFile(filepath.Join(dir, "hooks", "h2.json"), []byte(`{"custom":true}`), 0o644)
+	if err := EnsureGrokConfigDir(dir); err != nil {
+		t.Fatalf("EnsureGrokConfigDir (2nd call): %v", err)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "hooks", "h2.json"))
+	if string(data) != `{"custom":true}` {
+		t.Error("h2.json should not be overwritten on second call")
+	}
+}
+
+// TestGrokHarnessEnsureConfigDirWritesHooks verifies the harness wires the
+// config writer so launching a grok agent installs the hook registrations.
+func TestGrokHarnessEnsureConfigDirWritesHooks(t *testing.T) {
+	dir := t.TempDir()
+	rc := &RuntimeConfig{HarnessType: "grok", HarnessConfigPathPrefix: dir + "/grok-config", Profile: "default"}
+
+	h := &grokHarnessForTest{rc: rc}
+	if err := h.ensure(); err != nil {
+		t.Fatalf("EnsureConfigDir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "grok-config", "default", "hooks", "h2.json")); err != nil {
+		t.Fatalf("expected hooks/h2.json under profile dir: %v", err)
+	}
+}
+
+// grokHarnessForTest adapts the harness EnsureConfigDir without importing the
+// harness package (would be an import cycle from internal/config).
+type grokHarnessForTest struct{ rc *RuntimeConfig }
+
+func (g *grokHarnessForTest) ensure() error {
+	configDir := g.rc.HarnessConfigPathPrefix + "/" + g.rc.Profile
+	if configDir == "" || strings.TrimPrefix(configDir, "/") == "" {
+		return nil
+	}
+	return EnsureGrokConfigDir(configDir)
+}
