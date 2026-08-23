@@ -116,6 +116,10 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 	// XDG_CONFIG_HOME — i.e. a fresh launch would find no crush.json or
 	// CRUSH.md at all.
 	minRC.AgentName = name
+	// Role text must ride along too: the crush harness renders CRUSH.md (the
+	// agent's entire role prompt) during EnsureConfigDir below.
+	minRC.SystemPrompt = role.SystemPrompt
+	minRC.Instructions = role.GetInstructions()
 
 	// Resolve harness and ensure config directories exist.
 	h, err := harness.Resolve(minRC, nil)

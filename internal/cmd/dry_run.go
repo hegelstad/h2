@@ -41,6 +41,8 @@ func resolveAgentConfig(name string, role *config.Role, pod string, overrides []
 	minRC := buildRoleRuntimeConfig(role)
 	// Mirror agent_setup.go: env/config paths are per-agent for crush.
 	minRC.AgentName = name
+	minRC.SystemPrompt = role.SystemPrompt
+	minRC.Instructions = role.GetInstructions()
 	h, err := harness.Resolve(minRC, nil)
 	if err != nil {
 		return nil, fmt.Errorf("resolve harness: %w", err)
