@@ -2,8 +2,10 @@
 
 **Never use `config.ConfigDir()` in tests.** Tests must not touch the real h2 config
 directory. Use `setupFakeHome(t)` or a similar pattern that sets `H2_DIR` to a temp
-directory and calls `config.ResetResolveCache()`. This prevents test side effects on
-the real `~/.h2` directory and ensures test isolation.
+directory and calls `config.ResetResolveCache()`. `setupFakeHome` fails the test
+if `ResolveDir` still points at the host config dir (empty `H2_DIR` used to walk
+up into the real tree). Call `config.CheckTestIsolation()` after any custom
+H2_DIR setup. This prevents test side effects on the real `~/.h2` directory.
 
 ## Release Process
 

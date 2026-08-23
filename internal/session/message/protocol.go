@@ -20,6 +20,7 @@ type Request struct {
 	Raw             bool   `json:"raw,omitempty"`              // send body directly to PTY without prefix
 	ExpectsResponse bool   `json:"expects_response,omitempty"` // sender expects a response (adds annotation)
 	ERTriggerID     string `json:"er_trigger_id,omitempty"`    // trigger ID for expects-response annotation
+	StreamID        string `json:"stream_id,omitempty"`        // outbound rich-draft stream
 
 	// attach fields
 	Cols      int    `json:"cols,omitempty"`
@@ -101,6 +102,7 @@ type Response struct {
 	Triggers   []*TriggerSpec  `json:"triggers,omitempty"`
 	ScheduleID string          `json:"schedule_id,omitempty"`
 	Schedules  []*ScheduleSpec `json:"schedules,omitempty"`
+	StreamID   string          `json:"stream_id,omitempty"`
 }
 
 // BridgeInfo is the public representation of bridge status.

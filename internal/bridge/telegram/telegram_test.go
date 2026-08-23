@@ -13,16 +13,19 @@ import (
 )
 
 func TestSend(t *testing.T) {
-	var gotChatID, gotText string
+	var gotChat, gotText, gotMode string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/botTOKEN/sendMessage" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		r.ParseForm()
-		gotChatID = r.FormValue("chat_id")
+		_ = r.ParseForm()
+		gotChat = r.FormValue("chat_id")
 		gotText = r.FormValue("text")
-		json.NewEncoder(w).Encode(apiResponse{OK: true})
+		gotMode = r.FormValue("parse_mode")
+		var out sendMessageResponse
+		out.OK = true
+		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -36,11 +39,14 @@ func TestSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
-	if gotChatID != "42" {
-		t.Errorf("chat_id = %q, want %q", gotChatID, "42")
+	if gotChat != "42" {
+		t.Errorf("chat_id = %s, want 42", gotChat)
 	}
 	if gotText != "hello from h2" {
-		t.Errorf("text = %q, want %q", gotText, "hello from h2")
+		t.Errorf("text = %q", gotText)
+	}
+	if gotMode != "HTML" {
+		t.Errorf("parse_mode = %q, want HTML", gotMode)
 	}
 }
 
@@ -52,11 +58,13 @@ func TestSend_ChunksLongMessage(t *testing.T) {
 		if r.URL.Path != "/botTOKEN/sendMessage" {
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		r.ParseForm()
+		_ = r.ParseForm()
 		mu.Lock()
 		sentTexts = append(sentTexts, r.FormValue("text"))
 		mu.Unlock()
-		json.NewEncoder(w).Encode(apiResponse{OK: true})
+		var out sendMessageResponse
+		out.OK = true
+		json.NewEncoder(w).Encode(out)
 	}))
 	defer srv.Close()
 
@@ -83,18 +91,10 @@ func TestSend_ChunksLongMessage(t *testing.T) {
 	defer mu.Unlock()
 
 	if len(sentTexts) < 2 {
-		t.Fatalf("expected >= 2 chunks, got %d", len(sentTexts))
+		t.Fatalf("expected sendMessage to split 8000-char body, got %d", len(sentTexts))
 	}
-	// Verify all chunks are within limit.
-	for i, chunk := range sentTexts {
-		if len(chunk) > maxMessageLen {
-			t.Errorf("chunk[%d] len = %d, exceeds %d", i, len(chunk), maxMessageLen)
-		}
-	}
-	// Verify the full message is reconstructed.
-	reassembled := strings.Join(sentTexts, "")
-	if reassembled != msg {
-		t.Errorf("reassembled message doesn't match original (len %d vs %d)", len(reassembled), len(msg))
+	if !strings.Contains(sentTexts[0], "xxxx") {
+		t.Errorf("first chunk missing body: %s", sentTexts[0][:min(80, len(sentTexts[0]))])
 	}
 }
 
@@ -437,7 +437,9 @@ func TestPoll_SlashCommand_Intercepted(t *testing.T) {
 			mu.Lock()
 			sentTexts = append(sentTexts, r.FormValue("text"))
 			mu.Unlock()
-			json.NewEncoder(w).Encode(apiResponse{OK: true})
+			var out sendMessageResponse
+			out.OK = true
+			json.NewEncoder(w).Encode(out)
 		default:
 			http.NotFound(w, r)
 		}

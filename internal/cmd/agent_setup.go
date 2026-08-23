@@ -35,6 +35,8 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetCodexConfigPathPrefix()
 	case "crush":
 		harnessConfigPathPrefix = role.GetCrushConfigPathPrefix()
+	case "grok":
+		harnessConfigPathPrefix = role.GetGrokConfigPathPrefix()
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,
@@ -58,6 +60,9 @@ func buildCommandRuntimeConfig(command string) *config.RuntimeConfig {
 	case "codex":
 		ht = "codex"
 		configPrefix = filepath.Join(config.ConfigDir(), "codex-config")
+	case "grok":
+		ht = "grok"
+		configPrefix = filepath.Join(config.ConfigDir(), "grok-config")
 	}
 	return &config.RuntimeConfig{
 		HarnessType:             ht,
@@ -194,6 +199,7 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 		ClaudePermissionMode: role.ClaudePermissionMode,
 		CodexSandboxMode:     role.CodexSandboxMode,
 		CodexAskForApproval:  role.CodexAskForApproval,
+		GrokPermissionMode:   role.GrokPermissionMode,
 		PermissionReview:     role.PermissionReview,
 		AdditionalDirs:       additionalDirs,
 		Overrides:            overrideMap,
