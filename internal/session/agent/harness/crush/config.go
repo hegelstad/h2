@@ -69,6 +69,14 @@ func overrideInt(rc *config.RuntimeConfig, key string, def int) int {
 // renderCrushJSON builds the per-agent crush.json contents.
 //
 // Layout decisions (docs/plans/crush-harness.md §4):
+//   - providers.openrouter is defined EXPLICITLY. This is load-bearing:
+//     crush only honors a models.large/small `model` pin when the named
+//     provider is also declared in a providers block that lists that model.
+//     Without it, crush silently ignores the pin and falls back to the
+//     OpenRouter catalog's default_large_model_id (anthropic/claude-sonnet,
+//     which is PAID) — so every "Ox" turn quietly billed Sonnet. The
+//     api_key is written as the literal "$OPENROUTER_API_KEY" env-ref;
+//     crush expands it at runtime, so the secret never lands on disk.
 //   - models.large/small pin max_tokens (the OpenRouter 402 guard above).
 //   - options.data_directory is set as defense-in-depth so even a stray
 //     manual `crush` invocation under this agent's XDG env lands its
@@ -81,6 +89,23 @@ func renderCrushJSON(configDir, dataDir string, large, small int, model string) 
 	crushDir := filepath.Join(configDir, "crush")
 	cfg := map[string]any{
 		"$schema": "https://charm.land/crush.json",
+		"providers": map[string]any{
+			"openrouter": map[string]any{
+				"id":       "openrouter",
+				"name":     "OpenRouter",
+				"type":     "openai",
+				"base_url": "https://openrouter.ai/api/v1",
+				"api_key":  "$OPENROUTER_API_KEY",
+				"models": []map[string]any{
+					{
+						"id":                 model,
+						"name":               model,
+						"context_window":     1000000,
+						"default_max_tokens": large,
+					},
+				},
+			},
+		},
 		"models": map[string]any{
 			"large": map[string]any{
 				"provider":   "openrouter",

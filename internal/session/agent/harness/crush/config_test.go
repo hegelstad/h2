@@ -73,9 +73,34 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 		Permissions struct {
 			AllowedTools []string `json:"allowed_tools"`
 		} `json:"permissions"`
+		Providers struct {
+			OpenRouter struct {
+				Type    string `json:"type"`
+				BaseURL string `json:"base_url"`
+				APIKey  string `json:"api_key"`
+				Models  []struct {
+					ID string `json:"id"`
+				} `json:"models"`
+			} `json:"openrouter"`
+		} `json:"providers"`
 	}
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		t.Fatalf("parse crush.json: %v\n%s", err, raw)
+	}
+
+	// providers.openrouter is load-bearing: without it crush ignores the
+	// model pin and bills the paid Sonnet catalog default. Lock it in.
+	if cfg.Providers.OpenRouter.Type != "openai" {
+		t.Errorf("providers.openrouter.type = %q, want openai", cfg.Providers.OpenRouter.Type)
+	}
+	if cfg.Providers.OpenRouter.BaseURL != "https://openrouter.ai/api/v1" {
+		t.Errorf("providers.openrouter.base_url = %q, want OpenRouter base", cfg.Providers.OpenRouter.BaseURL)
+	}
+	if cfg.Providers.OpenRouter.APIKey != "$OPENROUTER_API_KEY" {
+		t.Errorf("providers.openrouter.api_key = %q, want $OPENROUTER_API_KEY env-ref", cfg.Providers.OpenRouter.APIKey)
+	}
+	if len(cfg.Providers.OpenRouter.Models) != 1 || cfg.Providers.OpenRouter.Models[0].ID != defaultModelID {
+		t.Errorf("providers.openrouter.models = %+v, want single %q", cfg.Providers.OpenRouter.Models, defaultModelID)
 	}
 
 	wantDataDir := filepath.Join(h2Dir, "crush-data", "test-crush-agent")
