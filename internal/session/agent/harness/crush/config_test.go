@@ -187,3 +187,21 @@ func TestEnsureConfigDir_RequiresConfigPrefix(t *testing.T) {
 		t.Fatal("expected error for empty HarnessConfigPathPrefix")
 	}
 }
+
+// TestAllowedTools_NoSilentDrift pins the exact allow-list against Crush
+// v0.91.0 tool names. Upstream renames tools silently; a version bump that
+// changes names must fail here so the permission config gets revisited.
+func TestAllowedTools_NoSilentDrift(t *testing.T) {
+	want := []string{
+		"bash", "edit", "write", "multiedit", "read", "view",
+		"glob", "grep", "ls", "patch", "todowrite", "todoread", "webfetch",
+	}
+	if len(allowedTools) != len(want) {
+		t.Fatalf("allowed_tools count = %d, want %d: %v", len(allowedTools), len(want), allowedTools)
+	}
+	for i, name := range want {
+		if allowedTools[i] != name {
+			t.Errorf("allowed_tools[%d] = %q, want %q", i, allowedTools[i], name)
+		}
+	}
+}

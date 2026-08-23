@@ -1,0 +1,21 @@
+variables:
+  working_dir:
+    description: "Working directory for the agent"
+    default: "."
+
+role_name: "{{ .RoleName }}" # role name is defined by the file name
+description: "A {{ .RoleName }} agent on the Crush harness (Charmbracelet CLI, lightweight)"
+
+agent_harness: crush
+agent_model: stealth/ox-alpha # OpenRouter model id; the crush harness pins output caps in crush.json
+profile: "default"
+
+# Role identity is delivered via CRUSH.md in the harness config dir
+# (`crush run` has no system-prompt flag). Output tokens are capped per turn
+# (defaults 4096 large / 2048 small) because OpenRouter rejects requests whose
+# max_tokens exceeds what the account credit can cover worst-case (HTTP 402);
+# tune via h2 run --override max_tokens_large=... --override max_tokens_small=...
+instructions: |
+  You are an h2 pod agent running on Crush. Your name is {{ .AgentName }}.
+  Reply to senders with results via `h2 send <sender> "..."`. Keep replies
+  short and put large artifacts in files, not chat.

@@ -463,13 +463,6 @@ func exitCodeOf(err error) int {
 	return -1
 }
 
-// signalIgnore detaches the shim from SIGINT/SIGHUP/SIGQUIT. The h2 PTY
-// delivers interrupts as 0x03 input bytes which we interpret explicitly; the
-// shim itself must stay alive to run the kill ladder and report turn.failed.
-func signalIgnore() {
-	signal.Notify(make(chan os.Signal, 1), syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
-}
-
 // limitedBuffer keeps only the last max bytes of what was written.
 type limitedBuffer struct {
 	max     int
