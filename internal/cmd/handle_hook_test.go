@@ -198,6 +198,7 @@ func TestHandleHook_ErrorNoAgent(t *testing.T) {
 }
 
 func TestHandleHook_ErrorNoEventName(t *testing.T) {
+	t.Setenv("GROK_HOOK_EVENT", "")
 	cmd := newHandleHookCmd()
 	cmd.SetArgs([]string{"--agent", "test"})
 	cmd.SetIn(bytes.NewBufferString(`{"some_field": "value"}`))
@@ -206,7 +207,7 @@ func TestHandleHook_ErrorNoEventName(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when hook_event_name missing")
 	}
-	if err.Error() != "hook_event_name not found in payload" {
+	if err.Error() != "hook_event_name not found in payload (or GROK_HOOK_EVENT)" {
 		t.Fatalf("unexpected error: %s", err)
 	}
 }
@@ -1020,5 +1021,86 @@ func TestCleanOtelEnv(t *testing.T) {
 	}
 	if len(cleaned) != 3 {
 		t.Errorf("expected 3 env vars after cleaning, got %d: %v", len(cleaned), cleaned)
+	}
+}
+
+// TestExtractHookEventName pins the tolerant extractor: Claude's snake_case
+// wins when both keys are present; grok's camelCase and the GROK_HOOK_EVENT
+// env var are accepted fallbacks.
+func TestExtractHookEventName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		data    string
+		env     string
+		want    string
+		wantErr bool
+	}{
+		{"claude snake_case", `{"hook_event_name":"Stop"}`, "", "Stop", false},
+		{"grok camelCase", `{"hookEventName":"stop"}`, "", "stop", false},
+		{"snake wins over camel", `{"hook_event_name":"Stop","hookEventName":"stop"}`, "", "Stop", false},
+		{"env fallback", `{}`, "stop", "stop", false},
+		{"none anywhere", `{}`, "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("GROK_HOOK_EVENT", tc.env)
+			} else {
+				t.Setenv("GROK_HOOK_EVENT", "")
+			}
+			got, err := extractHookEventName([]byte(tc.data))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %q", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleHook_GrokCamelCaseStop forwards a grok-style payload end to end:
+// camelCase hookEventName on stdin must reach the agent as EventName "stop"
+// with the full original payload (reason included) preserved.
+func TestHandleHook_GrokCamelCaseStop(t *testing.T) {
+	tmpDir := shortHookTempDir(t)
+	agent := setupMockAgent(t, tmpDir, "grokagent")
+
+	payload := `{"hookEventName":"stop","sessionId":"g-1","reason":"end_turn","stopHookActive":false}`
+
+	cmd := newHandleHookCmd()
+	cmd.SetArgs([]string{"--agent", "grokagent"})
+	cmd.SetIn(bytes.NewBufferString(payload))
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	reqs := agent.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(reqs))
+	}
+	if reqs[0].Type != "hook_event" {
+		t.Errorf("expected type=hook_event, got %q", reqs[0].Type)
+	}
+	if reqs[0].EventName != "stop" {
+		t.Errorf("expected event_name=stop, got %q", reqs[0].EventName)
+	}
+	var pm map[string]interface{}
+	if err := json.Unmarshal(reqs[0].Payload, &pm); err != nil {
+		t.Fatalf("parse forwarded payload: %v", err)
+	}
+	if pm["reason"] != "end_turn" {
+		t.Errorf("reason must survive forwarding, got %v", pm["reason"])
+	}
+	if got := stdout.String(); got != "{}\n" {
+		t.Errorf("expected stdout={}, got %q", got)
 	}
 }
