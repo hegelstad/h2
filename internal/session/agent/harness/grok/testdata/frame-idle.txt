@@ -1,0 +1,40 @@
+
+   integration/grok-deploy /tmp/h2-grokfix/e2etests                                                        24K / 500K
+
+
+     ❯ Reply with exactly one word: PONG                                                                     4:34 PM
+
+
+  ❙  ◆ Thought for 0.3s
+
+     PONG                                                                                                    4:34 PM
+
+     Worked for 7.9s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                                                                │
+  ╰────────────────────────────────────────────────────────────────────────────── Grok 4.6 (xhigh) · always-approve ─╯
+
+  Shift+Tab:mode  │  Ctrl+x:shortcuts
+

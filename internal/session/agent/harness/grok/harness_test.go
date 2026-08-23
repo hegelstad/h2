@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,28 +131,125 @@ func TestEnsureConfigDir_CreatesDir(t *testing.T) {
 	}
 }
 
-// --- Runtime tests (ptycollector-based, mirrors generic harness) ---
+// --- Runtime tests (screen-content idle detection) ---
 
-func TestStartAndOutputIdleDetection(t *testing.T) {
+// fakeScreen is a mutable screen source for driving the classifier in tests.
+type fakeScreen struct {
+	mu   sync.Mutex
+	text string
+}
+
+func (f *fakeScreen) set(s string) {
+	f.mu.Lock()
+	f.text = s
+	f.mu.Unlock()
+}
+
+func (f *fakeScreen) get() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.text
+}
+
+func eventState(t *testing.T, ev monitor.AgentEvent) monitor.State {
+	t.Helper()
+	if ev.Type != monitor.EventStateChange {
+		t.Fatalf("event type = %v, want %v", ev.Type, monitor.EventStateChange)
+	}
+	scd, ok := ev.Data.(monitor.StateChangeData)
+	if !ok {
+		t.Fatalf("event data = %T, want monitor.StateChangeData", ev.Data)
+	}
+	return scd.State
+}
+
+// waitForState drains events until it sees want or times out.
+func waitForState(t *testing.T, events <-chan monitor.AgentEvent, want monitor.State) {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case ev := <-events:
+			if eventState(t, ev) == want {
+				return
+			}
+		case <-deadline:
+			t.Fatalf("timed out waiting for state %v", want)
+		}
+	}
+}
+
+func startHarness(t *testing.T, screen func() string) (*GrokHarness, <-chan monitor.AgentEvent, context.CancelFunc) {
+	t.Helper()
 	h := New(testRC(nil))
 	if _, err := h.PrepareForLaunch(false); err != nil {
 		t.Fatalf("PrepareForLaunch: %v", err)
 	}
-	defer h.Stop()
-
+	h.SetScreenSource(screen)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	events := make(chan monitor.AgentEvent, 16)
+	events := make(chan monitor.AgentEvent, 64)
 	go func() { _ = h.Start(ctx, events) }()
+	return h, events, cancel
+}
 
-	h.HandleOutput()
+// Start emits an initial Active, then Idle once the screen shows the grok
+// prompt (a ready marker, no active marker) for the debounce window.
+func TestStart_ActiveThenIdleFromScreen(t *testing.T) {
+	fs := &fakeScreen{text: ""} // unknown during "startup"
+	_, events, cancel := startHarness(t, fs.get)
+	defer cancel()
+
+	// Initial emit is Active (child launching / not yet at prompt).
+	if got := eventState(t, <-events); got != monitor.StateActive {
+		t.Fatalf("first emit = %v, want Active", got)
+	}
+	// Screen reaches the idle prompt -> harness should declare Idle.
+	fs.set(miniIdleScreen)
+	waitForState(t, events, monitor.StateIdle)
+}
+
+// A turn indicator on screen flips the harness back to Active.
+func TestStart_IdleThenActiveOnTurn(t *testing.T) {
+	fs := &fakeScreen{text: miniIdleScreen}
+	_, events, cancel := startHarness(t, fs.get)
+	defer cancel()
+
+	waitForState(t, events, monitor.StateIdle)
+	fs.set(miniActiveScreen)
+	waitForState(t, events, monitor.StateActive)
+}
+
+// HandleInterrupt forces an immediate Idle even while a turn indicator shows.
+func TestHandleInterrupt_ForcesIdle(t *testing.T) {
+	fs := &fakeScreen{text: miniActiveScreen}
+	h, events, cancel := startHarness(t, fs.get)
+	defer cancel()
+
+	// Confirm it settled Active on the turn screen first.
+	if got := eventState(t, <-events); got != monitor.StateActive {
+		t.Fatalf("first emit = %v, want Active", got)
+	}
+	if !h.HandleInterrupt() {
+		t.Fatal("HandleInterrupt returned false after PrepareForLaunch")
+	}
+	waitForState(t, events, monitor.StateIdle)
+}
+
+// An unrecognized screen must hold the last known state (no spurious flip).
+func TestStart_UnknownHoldsLastState(t *testing.T) {
+	fs := &fakeScreen{text: miniIdleScreen}
+	_, events, cancel := startHarness(t, fs.get)
+	defer cancel()
+
+	waitForState(t, events, monitor.StateIdle)
+	// Garbage screen with no input box: classifies unknown, state must remain
+	// Idle (no event).
+	fs.set("qwertyuiop zxcvbnm\n")
 	select {
 	case ev := <-events:
-		if ev.Type != monitor.EventStateChange {
-			t.Fatalf("event type = %v, want %v", ev.Type, monitor.EventStateChange)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no state change event after output signal")
+		t.Fatalf("unexpected state change on unknown screen: %v", eventState(t, ev))
+	case <-time.After(600 * time.Millisecond):
+		// good: held last state
 	}
 }
 

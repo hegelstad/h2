@@ -1,0 +1,40 @@
+
+   integration/grok-deploy /tmp/h2-grokfix/e2etests                                                        24K / 500K
+
+
+     ❯ Count slowly from 1 to 30, one number per line.                                                       4:34 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    ⠋ Waiting for response… 3.7s                                                                    3.7s ⇣24.4k [stop]
+
+  ╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+  │ ❯ draft line one                                                                                                 │
+  │   draft line two                                                                                                 │
+  │   draft line three                                                                                               │
+  ╰────────────────────────────────────────────────────────────────────────────── Grok 4.6 (xhigh) · always-approve ─╯
+
+  Enter:queue  │  Alt+Enter:newline  │  Shift+Tab:mode  │  Esc:cancel  │  Ctrl+Enter:send now  │  Ctrl+x:shortcuts
+

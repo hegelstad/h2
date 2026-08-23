@@ -716,3 +716,23 @@ func TestResetScanState(t *testing.T) {
 		t.Fatal("expected scanCSIPrivateNum=0 after reset")
 	}
 }
+
+func TestScreenText_RendersVisibleRowsTrimmed(t *testing.T) {
+	vt := &VT{Vt: midterm.NewTerminal(4, 20)}
+	if _, err := vt.Vt.Write([]byte("hello\r\n  world  ")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := vt.ScreenText()
+	// One line per row, trailing spaces trimmed, newline-terminated rows.
+	want := "hello\n  world\n\n\n"
+	if got != want {
+		t.Fatalf("ScreenText() = %q, want %q", got, want)
+	}
+}
+
+func TestScreenText_NilTerminal(t *testing.T) {
+	vt := &VT{}
+	if got := vt.ScreenText(); got != "" {
+		t.Fatalf("ScreenText() on nil terminal = %q, want empty", got)
+	}
+}

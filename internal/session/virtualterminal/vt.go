@@ -449,6 +449,29 @@ func (vt *VT) IsIdle() bool {
 	return !vt.LastOut.IsZero() && time.Since(vt.LastOut) > idleThreshold
 }
 
+// ScreenText returns the current visible screen as plain text, one line per
+// row with trailing spaces trimmed. It reflects the live (non-scrollback)
+// midterm buffer — i.e. exactly what a connected client would see right now.
+//
+// This is the seam for harnesses that must derive agent state from rendered
+// TUI content rather than from output silence or structured hooks. The grok
+// harness uses it because Grok Build's TUI repaints continuously (animated
+// spinner/clock) and so never goes output-silent for the idle threshold.
+// Locks vt.Mu for the duration of the copy.
+func (vt *VT) ScreenText() string {
+	vt.Mu.Lock()
+	defer vt.Mu.Unlock()
+	if vt.Vt == nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, row := range vt.Vt.Content {
+		b.WriteString(strings.TrimRight(string(row), " "))
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // ErrPTYWriteTimeout is returned by WritePTY when the write does not complete
 // within the given deadline. The child process is likely hung (not reading stdin).
 var ErrPTYWriteTimeout = fmt.Errorf("pty write timed out")

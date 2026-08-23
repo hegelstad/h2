@@ -44,6 +44,40 @@
   still lands on the host config dir. Previously the helper set
   `H2_DIR=""` and resolution walked up into the real tree, so tests
   could reach a live Telegram socket.
+### Bug Fixes
+
+- **grok: reliably receive and reply to h2 messages**: The Grok Build harness now
+  derives idle/active state from rendered TUI screen content instead of output
+  silence. Grok Build's TUI repaints continuously (animated spinner + elapsed
+  clock), so it never goes output-silent — the previous ptycollector-based
+  detector could therefore never report idle, and normal-priority inter-agent
+  messages (including `--expects-response` replies) were never delivered. State
+  is now classified from the TUI's own indicators, scoped by REGION so marker
+  text appearing in the conversation transcript (a user quoting a marker, grok's
+  reply containing `[stop]`, grok viewing `classify.go` itself) can never pin the
+  agent Active: `Waiting for response` / `[stop]` are honored only on the status
+  line above the input box and only when an animated braille spinner co-occurs
+  there, and `Esc:cancel` only in the footer below the box. Idle is debounced and
+  an unrecognized screen holds last state and logs. The submit path (`text` +
+  50ms + `\r`) is unchanged, and a Ctrl+C-forced idle is briefly protected from a
+  still-painted turn marker undoing it. Markers are centralized in
+  `harness/grok/classify.go` and pinned against real captured screen frames
+  (idle-at-prompt, composing, active, and multi-line-active).
+
+### Internal
+
+- New `harness.ScreenReader` seam and `VT.ScreenText()` accessor let a harness
+  read the live rendered screen; wired by the session for screen-state harnesses.
+- New on-demand live smoke test (`e2etests`, build tag `grok_live`) drives real
+  grok through the VT + classifier + submit path end to end, plus a frame-capture
+  tool (build tag `grok_capture`) to regenerate the classifier fixtures.
+- **PTY idle detector no longer floods the event stream**: `ptycollector` now
+  emits state updates only on genuine idle<->active transitions. Previously it
+  emitted an `active` update on every output signal, so a chatty child (e.g. a
+  streaming CLI harness like Grok Build) produced thousands of duplicate
+  `state_change` events, ballooning the per-agent event log until the harness
+  was OOM-killed and restarted into the same loop. `SignalInterrupt` is now
+  routed through the run loop so state tracking stays consistent.
 
 ## v0.3.2
 

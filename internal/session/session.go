@@ -1006,6 +1006,12 @@ func (s *Session) configRelaunch() error {
 func (s *Session) startAgentPipeline(ctx context.Context) {
 	ctx, s.agentCancel = context.WithCancel(ctx)
 	if s.harness != nil {
+		// Harnesses that derive state from rendered screen content (e.g. grok)
+		// need the live screen source. Wire it here, after the VT exists and
+		// before Start, so it is available on both first launch and relaunch.
+		if sr, ok := s.harness.(harness.ScreenReader); ok && s.VT != nil {
+			sr.SetScreenSource(s.VT.ScreenText)
+		}
 		go s.harness.Start(ctx, s.monitor.Events()) //nolint:errcheck // harness startup loop is best-effort
 	}
 	go s.monitor.Run(ctx) //nolint:errcheck // monitor exits on context cancellation
