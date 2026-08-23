@@ -38,6 +38,7 @@ func NewRootCmd() *cobra.Command {
 		newBridgeCmd(),
 		newBridgeDaemonCmd(),
 		newHandleHookCmd(),
+		newCrushSupervisorCmd(),
 		newRoleCmd(),
 		newProfileCmd(),
 		newPodCmd(),

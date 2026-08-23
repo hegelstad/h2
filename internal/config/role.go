@@ -176,6 +176,7 @@ var ValidCodexSandboxModes = []string{
 var ValidHarnessTypes = []string{
 	"claude_code",
 	"codex",
+	"crush",
 	"generic",
 }
 
@@ -266,12 +267,13 @@ type Role struct {
 	Description string `yaml:"description,omitempty"`
 
 	// Harness fields.
-	AgentHarness               string `yaml:"agent_harness,omitempty"`                  // claude_code | codex | generic
+	AgentHarness               string `yaml:"agent_harness,omitempty"`                  // claude_code | codex | crush | generic
 	AgentModel                 string `yaml:"agent_model,omitempty"`                    // explicit model; empty => agent app's own default
 	AgentHarnessCommand        string `yaml:"agent_harness_command,omitempty"`          // command override for any harness
 	Profile                    string `yaml:"profile,omitempty"`                        // profile name (default: "default")
 	ClaudeCodeConfigPathPrefix string `yaml:"claude_code_config_path_prefix,omitempty"` // parent dir for Claude config profiles; default: <H2Dir>/claude-config
 	CodexConfigPathPrefix      string `yaml:"codex_config_path_prefix,omitempty"`       // parent dir for Codex config profiles; default: <H2Dir>/codex-config
+	CrushConfigPathPrefix      string `yaml:"crush_config_path_prefix,omitempty"`       // parent dir for Crush config profiles; default: <H2Dir>/crush-config
 
 	WorkingDir              string                 `yaml:"working_dir,omitempty"`               // agent CWD (default ".")
 	AdditionalDirs          []string               `yaml:"additional_dirs,omitempty"`           // extra dirs passed via --add-dir
@@ -484,6 +486,19 @@ func (r *Role) GetCodexConfigPathPrefix() string {
 		return r.CodexConfigPathPrefix
 	}
 	return filepath.Join(ConfigDir(), "codex-config")
+}
+
+// GetCrushConfigPathPrefix returns the Crush config path prefix, defaulting to <H2Dir>/crush-config.
+func (r *Role) GetCrushConfigPathPrefix() string {
+	if r.CrushConfigPathPrefix != "" {
+		return r.CrushConfigPathPrefix
+	}
+	return filepath.Join(ConfigDir(), "crush-config")
+}
+
+// GetCrushConfigDir returns the Crush config directory (prefix + profile).
+func (r *Role) GetCrushConfigDir() string {
+	return filepath.Join(r.GetCrushConfigPathPrefix(), r.GetProfile())
 }
 
 // GetCodexConfigDir returns the Codex config directory (prefix + profile).
