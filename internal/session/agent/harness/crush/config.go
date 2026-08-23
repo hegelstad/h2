@@ -77,19 +77,19 @@ func overrideInt(rc *config.RuntimeConfig, key string, def int) int {
 //   - options.global_context_paths points at the agent's CRUSH.md, which
 //     carries the role prompt (crush run has no system-prompt flag).
 //   - disable_provider_auto_update pins behavior across version bumps.
-func renderCrushJSON(configDir, dataDir string, large, small int) ([]byte, error) {
+func renderCrushJSON(configDir, dataDir string, large, small int, model string) ([]byte, error) {
 	crushDir := filepath.Join(configDir, "crush")
 	cfg := map[string]any{
 		"$schema": "https://charm.land/crush.json",
 		"models": map[string]any{
 			"large": map[string]any{
 				"provider":   "openrouter",
-				"model":      modelID,
+				"model":      model,
 				"max_tokens": large,
 			},
 			"small": map[string]any{
 				"provider":   "openrouter",
-				"model":      modelID,
+				"model":      model,
 				"max_tokens": small,
 			},
 		},
@@ -109,9 +109,17 @@ func renderCrushJSON(configDir, dataDir string, large, small int) ([]byte, error
 	return append(b, '\n'), nil
 }
 
-// modelID is the Ox Alpha stealth model on OpenRouter. The harness is
-// model-agnostic by config, but this is the pod default.
-const modelID = "stealth/ox-alpha"
+// defaultModelID is the Ox Alpha stealth model on OpenRouter — the pod
+// default. The harness honors rc.Model (role agent_model) first: any
+// OpenRouter model id works with no code change ("any model, one field").
+const defaultModelID = "stealth/ox-alpha"
+
+func modelFor(rc *config.RuntimeConfig) string {
+	if rc != nil && rc.Model != "" {
+		return rc.Model
+	}
+	return defaultModelID
+}
 
 // renderRoleMarkdown builds CRUSH.md from the role's system prompt and
 // instructions. Crush prepends context files to the model input, which is how

@@ -50,7 +50,7 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 		t.Fatalf("EnsureConfigDir: %v", err)
 	}
 
-	raw, err := os.ReadFile(filepath.Join(h.rc.HarnessConfigDir(), "crush", "crush.json"))
+	raw, err := os.ReadFile(filepath.Join(agentConfigDirFor(t, h), "crush.json"))
 	if err != nil {
 		t.Fatalf("read crush.json: %v", err)
 	}
@@ -79,8 +79,8 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 	}
 
 	wantDataDir := filepath.Join(h2Dir, "crush-data", "test-crush-agent")
-	if cfg.Models.Large.Model != modelID {
-		t.Errorf("large.model = %q, want %q", cfg.Models.Large.Model, modelID)
+	if cfg.Models.Large.Model != defaultModelID {
+		t.Errorf("large.model = %q, want %q", cfg.Models.Large.Model, defaultModelID)
 	}
 	if cfg.Models.Large.Provider != "openrouter" {
 		t.Errorf("large.provider = %q, want openrouter", cfg.Models.Large.Provider)
@@ -95,7 +95,7 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 		t.Errorf("options.data_directory = %q, want agent-scoped %q", cfg.Options.DataDirectory, wantDataDir)
 	}
 	if len(cfg.Options.GlobalContextPaths) != 1 ||
-		cfg.Options.GlobalContextPaths[0] != filepath.Join(h.rc.HarnessConfigDir(), "crush", "CRUSH.md") {
+		cfg.Options.GlobalContextPaths[0] != filepath.Join(agentConfigDirFor(t, h), "CRUSH.md") {
 		t.Errorf("global_context_paths = %v, want single absolute CRUSH.md path", cfg.Options.GlobalContextPaths)
 	}
 	if !cfg.Options.DisableProviderUpdate {
@@ -111,7 +111,7 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 		t.Errorf("allowed_tools missing \"bash\": %v", cfg.Permissions.AllowedTools)
 	}
 
-	roleRaw, err := os.ReadFile(filepath.Join(h.rc.HarnessConfigDir(), "crush", "CRUSH.md"))
+	roleRaw, err := os.ReadFile(filepath.Join(agentConfigDirFor(t, h), "CRUSH.md"))
 	if err != nil {
 		t.Fatalf("read CRUSH.md: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestEnsureConfigDir_Idempotent(t *testing.T) {
 	if err := h.EnsureConfigDir(h2Dir); err != nil {
 		t.Fatalf("first EnsureConfigDir: %v", err)
 	}
-	cfgPath := filepath.Join(h.rc.HarnessConfigDir(), "crush", "crush.json")
+	cfgPath := filepath.Join(agentConfigDirFor(t, h), "crush.json")
 	first, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestEnsureConfigDir_RoleOverridesMaxTokens(t *testing.T) {
 	if err := h.EnsureConfigDir(h2Dir); err != nil {
 		t.Fatalf("EnsureConfigDir: %v", err)
 	}
-	raw, _ := os.ReadFile(filepath.Join(h.rc.HarnessConfigDir(), "crush", "crush.json"))
+	raw, _ := os.ReadFile(filepath.Join(agentConfigDirFor(t, h), "crush.json"))
 	var cfg struct {
 		Models struct {
 			Large struct {
@@ -203,5 +203,45 @@ func TestAllowedTools_NoSilentDrift(t *testing.T) {
 		if allowedTools[i] != name {
 			t.Errorf("allowed_tools[%d] = %q, want %q", i, allowedTools[i], name)
 		}
+	}
+}
+
+// agentConfigDirFor mirrors the harness's per-agent config layout:
+// <HarnessConfigPathPrefix>/<profile>/<agentName>.
+func agentConfigDirFor(t *testing.T, h *CrushHarness) string {
+	t.Helper()
+	return filepath.Join(h.rc.HarnessConfigDir(), h.rc.AgentName, "crush")
+}
+
+// TestEnsureConfigDir_HonorsRoleModel — review REQUIRED #2: the role's
+// agent_model must reach crush.json (rc.Model), not be silently replaced by
+// the pod default.
+func TestEnsureConfigDir_HonorsRoleModel(t *testing.T) {
+	h2Dir := setupFakeHome(t)
+	h := New(testRC(t, h2Dir), nil)
+	h.rc.Model = "openai/gpt-4o-mini"
+	if err := h.EnsureConfigDir(h2Dir); err != nil {
+		t.Fatalf("EnsureConfigDir: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(agentConfigDirFor(t, h), "crush.json"))
+	if err != nil {
+		t.Fatalf("read crush.json: %v", err)
+	}
+	var cfg struct {
+		Models struct {
+			Large struct {
+				Model string `json:"model"`
+			} `json:"large"`
+			Small struct {
+				Model string `json:"model"`
+			} `json:"small"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("parse: %v\n%s", err, raw)
+	}
+	if cfg.Models.Large.Model != "openai/gpt-4o-mini" || cfg.Models.Small.Model != "openai/gpt-4o-mini" {
+		t.Errorf("model slots = %q/%q, want role model in both",
+			cfg.Models.Large.Model, cfg.Models.Small.Model)
 	}
 }

@@ -52,6 +52,32 @@ func TestBuildCommandArgs_Fresh(t *testing.T) {
 	}
 }
 
+// TestBuildCommandArgs_SessionFileWired is the regression test for the
+// review REQUIRED bug: without --session-file the supervisor never
+// persists the captured session id, HarnessSessionID stays empty, and
+// every relaunch starts a fresh crush session. The harness must wire the
+// flag itself — tests that set SessionFile manually masked the bug.
+func TestBuildCommandArgs_SessionFileWired(t *testing.T) {
+	t.Setenv("H2_CRUSH_HOST", "")
+	t.Setenv("H2_CRUSH_TURN_TIMEOUT", "")
+	h := New(&config.RuntimeConfig{AgentName: "a"}, nil)
+	got := h.BuildCommandArgs(nil, nil)
+	for i, arg := range got {
+		if arg != "--session-file" {
+			continue
+		}
+		if i+1 >= len(got) {
+			t.Fatalf("--session-file has no value: %v", got)
+		}
+		want := filepath.Join(config.ConfigDir(), "crush-data", "a", "session-id")
+		if got[i+1] != want {
+			t.Errorf("--session-file = %q, want %q", got[i+1], want)
+		}
+		return
+	}
+	t.Errorf("args %v missing --session-file", got)
+}
+
 func TestBuildCommandArgs_Resume(t *testing.T) {
 	rc := &config.RuntimeConfig{
 		AgentName:        "a",
@@ -83,8 +109,9 @@ func TestBuildCommandEnvVars(t *testing.T) {
 	if env["H2_CRUSH_DATA_DIR"] != wantData {
 		t.Errorf("H2_CRUSH_DATA_DIR = %q, want %q", env["H2_CRUSH_DATA_DIR"], wantData)
 	}
-	if env["XDG_CONFIG_HOME"] != h.rc.HarnessConfigDir() {
-		t.Errorf("XDG_CONFIG_HOME = %q, want %q", env["XDG_CONFIG_HOME"], h.rc.HarnessConfigDir())
+	wantConfig := filepath.Join(h.rc.HarnessConfigDir(), "test-crush-agent")
+	if env["XDG_CONFIG_HOME"] != wantConfig {
+		t.Errorf("XDG_CONFIG_HOME = %q, want per-agent %q", env["XDG_CONFIG_HOME"], wantConfig)
 	}
 	if env["H2_ACTOR"] != "test-crush-agent" {
 		t.Errorf("H2_ACTOR = %q", env["H2_ACTOR"])

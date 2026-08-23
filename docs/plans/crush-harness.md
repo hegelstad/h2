@@ -137,8 +137,13 @@ list`, everything). Test result (two agents, same cwd, concurrent):
   project db entirely;
 - each agent's `crush session list --json -D <dir>` sees only its own sessions.
 
-Config root renamed to something neutral: `~/h2home/harness-config/<agent>/`
-(`xdg-config/`, `data/`) — not `opencode-config/`.
+Config root (as implemented): per-agent
+`<H2Dir>/crush-config/<profile>/<agent>/` (`crush/` holds the generated
+`crush.json` + `CRUSH.md`; `xdg-data/` is scratch). Per-agent — not
+profile-level — because the generated `crush.json` embeds this agent's
+`options.data_directory`; a shared file would let same-profile agents
+overwrite each other's defense-in-depth data dir. Crush state lives in
+per-agent `<H2Dir>/crush-data/<agent>/` (`--data-dir` on every command).
 
 Socket insurance: always pass an explicit per-agent
 `--host unix://<per-agent path>` so a stray `crush server` can never silently
@@ -149,7 +154,7 @@ collect runs via the box-wide default socket (`/tmp/<uid>/crush-<uid>.sock`).
 `crush run` has no system-prompt flag and the schema has no system-prompt
 option (only provider-level `system_prompt_prefix`). Verified mechanism:
 **per-agent context file** — EnsureConfigDir writes the role prompt to
-`~/h2home/harness-config/<agent>/CRUSH.md` and points
+`<H2Dir>/crush-config/<profile>/<agent>/crush/CRUSH.md` and points
 `options.global_context_paths` at that absolute path. Test: role instruction
 ("every reply must end with PINEAPPLE") placed in that file was followed by
 `crush run` in a shared workspace — role identity reaches the model without
@@ -169,6 +174,14 @@ unambiguous only because of per-agent `--data-dir`.
 
 ## 5. Supervisor shim spec
 
+- **On-disk layout (as implemented):**
+  - config: `<H2Dir>/crush-config/<profile>/<agent>/crush/{crush.json,CRUSH.md}`
+    (`XDG_CONFIG_HOME` points at the per-agent dir; `xdg-data/` beside it)
+  - data: `<H2Dir>/crush-data/<agent>/` (`--data-dir` on every crush command;
+    holds `crush.db`, sessions, and `session-id`)
+  - `session-id`: file where the shim persists the captured crush session id,
+    wired via the harness's `--session-file <dataDir>/session-id`; without it
+    capture is never persisted and relaunches start fresh (§4.3).
 - **Stdin protocol:** one delivered message = one line = one turn (matches
   `deliver()`'s typed-line + `\r` shape; multi-line bodies arrive as
   file-reference paths per existing inline-vs-file logic — supervisor reads the
@@ -197,7 +210,8 @@ unambiguous only because of per-agent `--data-dir`.
 ## 6. Testing
 
 Unit (in-package, `go test ./internal/session/agent/harness/crush/...`, rolls
-into `make test`): BuildCommandArgs (fresh/resume/`--session`/`-D`/`--host`),
+into `make test`): BuildCommandArgs (fresh/resume/`--session`/`--data-dir`/
+`--host`),
 EnvVars (XDG + key), EnsureConfigDir idempotency with `setupFakeHome(t)`
 (never touch real config per repo AGENTS.md), **permissions-drift test**
 (generated crush.json parses + contains expected `allowed_tools` — catches

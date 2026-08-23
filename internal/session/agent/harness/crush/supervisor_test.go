@@ -331,6 +331,21 @@ echo '[]'
 	if !strings.Contains(hooks, EventTurnCompleted) {
 		t.Errorf("post-interrupt turn did not complete:\n%s", hooks)
 	}
+	var failedLine, completedLine string
+	for _, l := range readHooks(t, logFile) {
+		if strings.Contains(l, EventTurnFailed) && strings.Contains(l, `"interrupted":true`) {
+			failedLine = l
+		}
+		if strings.Contains(l, EventTurnCompleted) {
+			completedLine = l
+		}
+	}
+	if failedLine == "" {
+		t.Errorf("interrupted turn.failed payload must set \"interrupted\":true:\n%s", hooks)
+	}
+	if strings.Contains(completedLine, `"interrupted":true`) {
+		t.Errorf("clean post-interrupt turn must not be flagged interrupted: %s", completedLine)
+	}
 }
 
 // Two supervisors over the same cwd must each pin their own --data-dir;

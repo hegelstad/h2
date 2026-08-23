@@ -5,6 +5,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"h2/internal/session/agent/monitor"
@@ -33,6 +34,9 @@ type turnPayload struct {
 type eventHandler struct {
 	ch chan monitor.AgentEvent
 
+	// mu guards the fields below: HandleHookEvent is invoked from the
+	// listener's RPC goroutine, so concurrent hook deliveries must not race.
+	mu           sync.Mutex
 	lastState    monitor.State
 	lastSubState monitor.SubState
 	sessionID    string
@@ -74,6 +78,8 @@ func (h *eventHandler) handleHook(eventName string, payload json.RawMessage) boo
 // distinct id, as EventSessionStarted — the daemon persists it as
 // HarnessSessionID for resume.
 func (h *eventHandler) captureSessionID(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if id == "" || id == h.sessionID {
 		return
 	}
@@ -129,6 +135,8 @@ func (h *eventHandler) emitErrorInfo(p *turnPayload) {
 // zero-value lastState (StateInitialized) guarantees the very first
 // transition always emits.
 func (h *eventHandler) emitStateTransition(state monitor.State, sub monitor.SubState) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if state == h.lastState && sub == h.lastSubState {
 		return
 	}

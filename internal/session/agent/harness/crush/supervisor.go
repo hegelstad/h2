@@ -146,8 +146,14 @@ func (s *supervisor) handleSignals() (stop func()) {
 func (s *supervisor) forwardSignalToChild(sig os.Signal) {
 	s.mu.Lock()
 	cmd := s.current
+	started := s.started
+	if sig == syscall.SIGINT && cmd != nil {
+		s.interruptedTurn = true
+	}
 	s.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	// started is published after cmd.Start() (under mu), so reaching here
+	// with started=true guarantees cmd.Process is fully initialized.
+	if cmd == nil || !started || cmd.Process == nil {
 		return
 	}
 	pgid := -cmd.Process.Pid // negative pid => whole process group
@@ -156,14 +162,26 @@ func (s *supervisor) forwardSignalToChild(sig os.Signal) {
 	syscall.Kill(pgid, syscall.SIGKILL)
 }
 
+// clearCurrent unregisters the in-flight turn.
+func (s *supervisor) clearCurrent() {
+	s.mu.Lock()
+	s.current = nil
+	s.started = false
+	s.mu.Unlock()
+}
+
 type supervisor struct {
 	opts      Supervisor
 	stderr    io.Writer
 	mu        sync.Mutex
 	current   *exec.Cmd
+	started   bool // published after cmd.Start(); guards Process access
 	sessionID string
 	beforeIDs map[string]bool // session ids present before the first turn
 	tookSnap  bool
+	// interruptedTurn is set when we killed the in-flight turn because the
+	// user hit Ctrl+C (forwarded SIGINT); surfaced in turn.completed/failed.
+	interruptedTurn bool
 }
 
 // splitCRorLF splits input on \r or \n (h2 delivers lines terminated by \r).
@@ -238,6 +256,7 @@ func (s *supervisor) runTurn(ctx context.Context, prompt string, stdout io.Write
 
 	s.mu.Lock()
 	s.current = cmd
+	s.interruptedTurn = false
 	needSnapshot := s.sessionID == "" && s.opts.ResumeSessionID == ""
 	s.mu.Unlock()
 	if needSnapshot && s.opts.SessionFile != "" {
@@ -248,6 +267,12 @@ func (s *supervisor) runTurn(ctx context.Context, prompt string, stdout io.Write
 		s.fail(-1, fmt.Sprintf("spawn crush: %v", err))
 		return nil
 	}
+	// Publish started=true only AFTER Start() has populated cmd.Process:
+	// the signal goroutine checks it under mu, so it never touches a
+	// half-initialized Cmd (data race caught by -race).
+	s.mu.Lock()
+	s.started = true
+	s.mu.Unlock()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
@@ -269,26 +294,28 @@ waitLoop:
 		case <-ctx.Done():
 			killChildGroup(cmd)
 			<-done
-			s.mu.Lock()
-			s.current = nil
-			s.mu.Unlock()
+			s.clearCurrent()
 			return ctx.Err()
 		}
 	}
-	s.mu.Lock()
-	s.current = nil
-	s.mu.Unlock()
+	s.clearCurrent()
 
 	exitCode := exitCodeOf(waitErr)
+	interrupted := s.takeInterrupted()
 	switch {
 	case timedOut:
 		s.fail(exitCode, "turn timed out after "+s.opts.TurnTimeout.String())
 	case waitErr != nil:
-		s.fail(exitCode, errBuf.tail())
+		s.failPayload(exitCode, errBuf.tail(), interrupted)
+	case interrupted:
+		// crush exited cleanly after our forwarded SIGINT: still a
+		// user-cancelled turn, not a normal completion.
+		s.failPayload(exitCode, "", true)
 	default:
 		s.emit(EventTurnCompleted, turnPayload{
 			HookEventName: EventTurnCompleted,
 			SessionID:     s.captureSessionID(),
+			Interrupted:   interrupted,
 		})
 	}
 	return nil
@@ -298,8 +325,9 @@ waitLoop:
 func (s *supervisor) killCurrent(reason string) {
 	s.mu.Lock()
 	cmd := s.current
+	started := s.started
 	s.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
+	if cmd == nil || !started || cmd.Process == nil {
 		return
 	}
 	killChildGroup(cmd)
@@ -422,11 +450,26 @@ func (s *supervisor) emit(event string, payload turnPayload) {
 }
 
 func (s *supervisor) fail(exitCode int, tail string) {
+	s.failPayload(exitCode, tail, s.takeInterrupted())
+}
+
+// failPayload emits turn.failed; interrupted marks user-cancelled turns.
+func (s *supervisor) failPayload(exitCode int, tail string, interrupted bool) {
 	s.emit(EventTurnFailed, turnPayload{
 		HookEventName: EventTurnFailed,
 		ExitCode:      exitCode,
+		Interrupted:   interrupted,
 		StderrTail:    tail,
 	})
+}
+
+// takeInterrupted reads and clears the interrupted flag.
+func (s *supervisor) takeInterrupted() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v := s.interruptedTurn
+	s.interruptedTurn = false
+	return v
 }
 
 // sessionRecord mirrors the entries of `crush session list --json`.

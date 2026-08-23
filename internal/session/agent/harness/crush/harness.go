@@ -101,19 +101,21 @@ func (h *CrushHarness) SupportsResume() bool { return true }
 // sessions). It MUST be agent-scoped: the default <project>/.crush db is
 // cwd-local and collides when several agents share a workspace.
 func (h *CrushHarness) DataDir(h2Dir string) string {
-	name := h.rc.AgentName
-	if name == "" {
-		name = "unnamed"
-	}
-	return filepath.Join(h2Dir, "crush-data", name)
+	return filepath.Join(h2Dir, "crush-data", h.agentName())
 }
 
 // BuildCommandArgs assembles the supervisor invocation. With ResumeSessionID
-// set (relaunch/resume), the supervisor replays --session on every turn.
+// set (relaunch/resume), the supervisor replays --session on every turn;
+// otherwise it captures the first turn's session id and persists it to
+// --session-file (REQUIRED in prod: without it the capture is never
+// persisted, HarnessSessionID stays empty, and every relaunch starts a
+// fresh crush session).
 func (h *CrushHarness) BuildCommandArgs(prependArgs, extraArgs []string) []string {
 	var roleArgs []string
+	dataDir := h.DataDir(config.ConfigDir())
 	roleArgs = append(roleArgs, SupervisorSubcommand)
-	roleArgs = append(roleArgs, "--data-dir", h.DataDir(config.ConfigDir()))
+	roleArgs = append(roleArgs, "--data-dir", dataDir)
+	roleArgs = append(roleArgs, "--session-file", filepath.Join(dataDir, "session-id"))
 	if host := os.Getenv("H2_CRUSH_HOST"); host != "" {
 		// Pin an explicit socket so a stray shared-server can never silently
 		// collect our runs via the box-wide default socket.
@@ -128,11 +130,27 @@ func (h *CrushHarness) BuildCommandArgs(prependArgs, extraArgs []string) []strin
 	return harness.CombineArgs(prependArgs, extraArgs, roleArgs)
 }
 
+// agentConfigDir returns THIS agent's crush config root:
+// <HarnessConfigPathPrefix>/<profile>/<agentName>. Per-agent (not
+// profile-level) because the generated crush.json embeds this agent's
+// data_directory — a shared file would let same-profile agents overwrite
+// each other's defense-in-depth data dir on every EnsureConfigDir.
+func (h *CrushHarness) agentConfigDir() string {
+	return filepath.Join(h.rc.HarnessConfigDir(), h.agentName())
+}
+
+func (h *CrushHarness) agentName() string {
+	if name := h.rc.AgentName; name != "" {
+		return name
+	}
+	return "unnamed"
+}
+
 // BuildCommandEnvVars returns the env vars scoping the supervisor (and its
 // crush children) to this agent's config/data dirs.
 func (h *CrushHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
-	configDir := h.rc.HarnessConfigDir()
-	if configDir == "" {
+	configDir := h.agentConfigDir()
+	if h.rc.HarnessConfigDir() == "" {
 		return nil
 	}
 	env := map[string]string{
@@ -147,10 +165,10 @@ func (h *CrushHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 // EnsureConfigDir writes the per-agent crush.json and CRUSH.md role file.
 // Idempotent: files are only rewritten when content changes.
 func (h *CrushHarness) EnsureConfigDir(h2Dir string) error {
-	configDir := h.rc.HarnessConfigDir()
-	if configDir == "" {
+	if h.rc.HarnessConfigDir() == "" {
 		return fmt.Errorf("crush harness requires a config path prefix")
 	}
+	configDir := h.agentConfigDir()
 	crushDir := filepath.Join(configDir, "crush")
 	if err := os.MkdirAll(crushDir, 0o755); err != nil {
 		return fmt.Errorf("create crush config dir: %w", err)
@@ -160,7 +178,7 @@ func (h *CrushHarness) EnsureConfigDir(h2Dir string) error {
 		return fmt.Errorf("create crush data dir: %w", err)
 	}
 	cfg, err := renderCrushJSON(configDir, dataDir,
-		maxTokensLarge(h.rc), maxTokensSmall(h.rc))
+		maxTokensLarge(h.rc), maxTokensSmall(h.rc), modelFor(h.rc))
 	if err != nil {
 		return fmt.Errorf("render crush.json: %w", err)
 	}
