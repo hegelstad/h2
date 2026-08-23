@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- **Rate-limit bridge notifications**: When an agent hits a Claude/Codex usage
+  limit, h2 now sends a one-time alert over every running bridge (e.g.
+  Telegram) with the agent name, profile, reset time, and a `h2 rotate` hint.
+  The notification is best-effort, fires once per distinct limit (deduped via
+  the profile's `ratelimit.json`), runs off the monitor goroutine, and reaches
+  the user even though the limited agent itself cannot make model calls (the
+  bridge is a separate process). Costs no model tokens.
+
+### Changes
+
+- **Revert custom Telegram formatting layer**: Removed `--format`
+  (HTML / MarkdownV2 / rich / rich-html), the `FormattedSender` and
+  `RichSender` interfaces, and inbound photo/document handling. This is
+  a deliberate revert of the custom formatting layer, not a regression:
+  the Bot API rich-draft path will replace it. Outbound Telegram is
+  again a plain `sendMessage` of the unmodified text. Losing inbound
+  image/file handling is accepted.
+- **Telegram chat HTML (not rich documents)**: `h2 send` to Telegram
+  persists via `sendMessage` + `parse_mode=HTML` so replies look like
+  normal chat bubbles. While the target agent is active, the bridge
+  refreshes the classic blue typing indicator (`sendChatAction`)
+  every 4s. There is no Thinking preview and no `sendMessageDraft`.
+  `--stdin` buffers and sends one `sendMessage` on close. Rich-only
+  tags (`<p>`, `<ul>`, …) are downconverted. `sendRichMessage` is
+  not used. No `--format` flag. If HTML is rejected, the original
+  text is sent plain.
+
+### Bug Fixes
+
+- **Attach first-try drop**: `ReadResponse`/`ReadRequest` no longer use
+  `json.Decoder`, which buffered past the handshake newline and could
+  swallow the first binary attach frames. First `h2 attach` after a cold
+  start then desynced and exited with no error. Handshake JSON is now
+  read one byte at a time through the terminating newline.
+
+- **Test isolation guard**: `setupFakeHome` now points `H2_DIR` at a
+  temp h2 directory with a marker and fails the test if `ResolveDir`
+  still lands on the host config dir. Previously the helper set
+  `H2_DIR=""` and resolution walked up into the real tree, so tests
+  could reach a live Telegram socket.
+
 ## v0.3.2
 
 ### New Features

@@ -43,7 +43,15 @@ type Service struct {
 	messagesSent     int64
 	messagesReceived int64
 
+	streams map[string]*liveStream
+
 	mu sync.Mutex
+}
+
+type liveStream struct {
+	s      bridge.MessageStream
+	from   string
+	tagged bool
 }
 
 // ServiceOpts holds optional configuration for the bridge service.
@@ -65,6 +73,7 @@ func New(bridges []bridge.Bridge, name, concierge, pod, socketDir string, allowe
 		allowedCommands:   allowedCommands,
 		startTime:         time.Now(),
 		queryAgentStateFn: nil,
+		streams:           make(map[string]*liveStream),
 	}
 	if len(opts) > 0 {
 		s.expectsResponse = opts[0].ExpectsResponse
@@ -168,6 +177,12 @@ func (s *Service) handleConn(conn net.Conn) {
 		} else {
 			message.SendResponse(conn, &message.Response{OK: true})
 		}
+	case "send_stream_open":
+		message.SendResponse(conn, s.handleStreamOpen(req))
+	case "send_stream_write":
+		message.SendResponse(conn, s.handleStreamWrite(req))
+	case "send_stream_close":
+		message.SendResponse(conn, s.handleStreamClose(req))
 	case "status":
 		message.SendResponse(conn, &message.Response{
 			OK:     true,
@@ -184,7 +199,7 @@ func (s *Service) handleConn(conn net.Conn) {
 		s.cancel()
 	default:
 		message.SendResponse(conn, &message.Response{
-			Error: "bridge only handles 'send', 'status', 'stop', 'set-concierge', and 'remove-concierge' requests",
+			Error: "bridge only handles 'send', 'send_stream_open', 'send_stream_write', 'send_stream_close', 'status', 'stop', 'set-concierge', and 'remove-concierge' requests",
 		})
 	}
 }
@@ -197,6 +212,12 @@ func (s *Service) handleInbound(targetAgent, body string) {
 	s.lastActivityTime = time.Now()
 	s.mu.Unlock()
 	target := targetAgent
+	deliverBody := body
+	if target != "" && !s.agentExists(target) {
+		// "note:" / "troubleshoot:" is ordinary prose, not an address.
+		deliverBody = target + ": " + body
+		target = ""
+	}
 	if target == "" {
 		target = s.resolveDefaultTarget()
 	}
@@ -206,7 +227,7 @@ func (s *Service) handleInbound(targetAgent, body string) {
 		return
 	}
 	log.Printf("bridge: routing inbound to %s", target)
-	if err := s.sendToAgent(target, s.name, body); err != nil {
+	if err := s.sendToAgent(target, s.name, deliverBody); err != nil {
 		log.Printf("bridge: send to agent %s: %v", target, err)
 		s.replyError(fmt.Sprintf("%s agent is not running, unable to deliver message.", target))
 	} else {
@@ -216,7 +237,6 @@ func (s *Service) handleInbound(targetAgent, body string) {
 	}
 }
 
-// replyError sends an error message back to all Sender bridges.
 func (s *Service) replyError(msg string) {
 	ctx := context.Background()
 	for _, b := range s.bridges {
@@ -295,6 +315,81 @@ func (s *Service) handleRemoveConcierge() *message.Response {
 	s.sendBridgeStatus(ctx, msg)
 
 	return &message.Response{OK: true}
+}
+
+func (s *Service) handleStreamOpen(req *message.Request) *message.Response {
+	var st bridge.Streamer
+	for _, b := range s.bridges {
+		if cand, ok := b.(bridge.Streamer); ok {
+			st = cand
+			break
+		}
+	}
+	if st == nil {
+		return &message.Response{Error: "bridge does not support streaming sends"}
+	}
+	stream, err := st.OpenStream(context.Background())
+	if err != nil {
+		return &message.Response{Error: err.Error()}
+	}
+	id := genStreamID()
+	s.mu.Lock()
+	s.streams[id] = &liveStream{s: stream, from: req.From}
+	s.mu.Unlock()
+	go s.reapStream(id, stream.Done())
+	return &message.Response{OK: true, StreamID: id}
+}
+
+func (s *Service) reapStream(id string, done <-chan struct{}) {
+	<-done
+	s.mu.Lock()
+	delete(s.streams, id)
+	s.mu.Unlock()
+}
+
+func (s *Service) handleStreamWrite(req *message.Request) *message.Response {
+	s.mu.Lock()
+	ls, ok := s.streams[req.StreamID]
+	s.mu.Unlock()
+	if !ok {
+		return &message.Response{Error: "unknown stream_id"}
+	}
+	body := req.Body
+	if !ls.tagged {
+		s.mu.Lock()
+		concierge := s.concierge
+		s.mu.Unlock()
+		if ls.from != "" && ls.from != concierge {
+			body = bridge.FormatAgentTag(ls.from, body)
+		}
+		ls.tagged = true
+	}
+	if _, err := ls.s.Write([]byte(body)); err != nil {
+		return &message.Response{Error: err.Error()}
+	}
+	return &message.Response{OK: true, StreamID: req.StreamID}
+}
+
+func (s *Service) handleStreamClose(req *message.Request) *message.Response {
+	s.mu.Lock()
+	ls, ok := s.streams[req.StreamID]
+	if ok {
+		delete(s.streams, req.StreamID)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return &message.Response{Error: "unknown stream_id"}
+	}
+	if err := ls.s.Close(); err != nil {
+		return &message.Response{Error: err.Error()}
+	}
+	return &message.Response{OK: true}
+}
+
+func genStreamID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%08x", b)
 }
 
 // sendOutbound sends a message from an agent to all Sender bridges.
@@ -585,6 +680,23 @@ func (s *Service) buildBridgeInfo() *message.BridgeInfo {
 		MessagesReceived: received,
 		LastActivity:     lastActivityStr,
 	}
+}
+
+// agentExists reports whether an agent socket is present in the socket
+// directory. This is the same discovery firstAvailableAgent uses: a
+// name is an address only if that socket exists. We do not dial here,
+// so a transient delivery failure is not turned into a silent reroute.
+func (s *Service) agentExists(name string) bool {
+	agents, err := socketdir.ListByTypeIn(s.socketDir, socketdir.TypeAgent)
+	if err != nil {
+		return false
+	}
+	for _, a := range agents {
+		if a.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveDefaultTarget returns the agent to route un-addressed inbound messages to.

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"testing"
 
 	"h2/internal/config"
@@ -147,5 +148,57 @@ func TestRuntimeConfig_CodexFields(t *testing.T) {
 	}
 	if s.RC.CodexSandboxMode != "danger-full-access" {
 		t.Fatalf("CodexSandboxMode not stored: got %q", s.RC.CodexSandboxMode)
+	}
+}
+
+func TestFilteredEnv_StripsInheritedHarnessSessionVars(t *testing.T) {
+	env := []string{
+		"CLAUDECODE=1",
+		"CLAUDE_CODE_CHILD_SESSION=1",
+		"CLAUDE_CODE_SESSION_ID=abc-123",
+		"CLAUDE_CODE_ENTRYPOINT=cli",
+		"CLAUDE_CODE_EXECPATH=/usr/bin/claude",
+		"CLAUDE_PID=4242",
+		// Must survive: h2 sets these deliberately for the agent.
+		"CLAUDE_CONFIG_DIR=/home/ubuntu/h2home/claude-config/default",
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"H2_DIR=/home/ubuntu/h2home",
+		"PATH=/usr/bin",
+	}
+
+	got := filteredEnv(env, inheritedHarnessSessionVars...)
+
+	want := []string{
+		"CLAUDE_CONFIG_DIR=/home/ubuntu/h2home/claude-config/default",
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"H2_DIR=/home/ubuntu/h2home",
+		"PATH=/usr/bin",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("filteredEnv() = %v, want %v", got, want)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("filteredEnv()[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
+func TestSanitizeInheritedEnv_ClearsProcessEnv(t *testing.T) {
+	// t.Setenv restores the previous values when the test finishes.
+	t.Setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("CLAUDE_PID", "4242")
+	t.Setenv("CLAUDE_CONFIG_DIR", "/keep/me")
+
+	sanitizeInheritedEnv()
+
+	for _, key := range inheritedHarnessSessionVars {
+		if v, ok := os.LookupEnv(key); ok {
+			t.Errorf("sanitizeInheritedEnv() left %s=%q set", key, v)
+		}
+	}
+	if got := os.Getenv("CLAUDE_CONFIG_DIR"); got != "/keep/me" {
+		t.Errorf("CLAUDE_CONFIG_DIR = %q, want /keep/me", got)
 	}
 }

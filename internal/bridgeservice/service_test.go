@@ -357,8 +357,62 @@ func TestHandleInbound_ExplicitDeadAgentRepliesWithError(t *testing.T) {
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 error reply, got %d", len(msgs))
 	}
-	if msgs[0] != "foo agent is not running, unable to deliver message." {
+	if msgs[0] != "No agents are running, unable to deliver message." {
 		t.Errorf("unexpected reply: %q", msgs[0])
+	}
+}
+
+func TestHandleInbound_UnknownPrefixFallsBackToDefault(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	sender := &mockSender{name: "telegram"}
+	svc := New([]bridge.Bridge{sender}, "alice", "concierge", "", tmpDir, nil)
+	svc.conciergeAlive = true
+
+	svc.handleInbound("troubleshoot", "hjelp meg")
+
+	if msgs := sender.Messages(); len(msgs) != 0 {
+		t.Fatalf("did not want an error reply, got %v", msgs)
+	}
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "troubleshoot: hjelp meg" {
+		t.Errorf("body = %q, want original text with prefix restored", reqs[0].Body)
+	}
+}
+
+func TestHandleInbound_KnownPrefixStillStripped(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
+
+	svc.handleInbound("concierge", "hei")
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "hei" {
+		t.Errorf("body = %q, want prefix stripped", reqs[0].Body)
+	}
+}
+
+func TestHandleInbound_MidSentenceColonUnchanged(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	concierge := newMockAgent(t, tmpDir, "concierge")
+	svc := New(nil, "alice", "concierge", "", tmpDir, nil)
+	svc.conciergeAlive = true
+
+	svc.handleInbound("", "see note: later today")
+
+	reqs := concierge.Received()
+	if len(reqs) != 1 {
+		t.Fatalf("expected 1 request to concierge, got %d", len(reqs))
+	}
+	if reqs[0].Body != "see note: later today" {
+		t.Errorf("body = %q, want unchanged", reqs[0].Body)
 	}
 }
 
@@ -631,6 +685,27 @@ func TestResolveDefaultTarget_NoAgents(t *testing.T) {
 }
 
 // --- Typing loop tests ---
+
+func TestInbound_SetsLastRoutedAgent(t *testing.T) {
+	tmpDir := shortTempDir(t)
+	_ = newMockStatusAgent(t, tmpDir, "concierge", "idle")
+
+	tb := &mockTypingBridge{name: "telegram"}
+	svc := New([]bridge.Bridge{tb}, "alice", "concierge", "", tmpDir, nil)
+	svc.mu.Lock()
+	svc.lastRoutedAgent = "concierge"
+	svc.mu.Unlock()
+
+	if tb.TypingCalls() != 0 {
+		t.Fatalf("inbound must not fire typing itself, got %d", tb.TypingCalls())
+	}
+	svc.mu.Lock()
+	got := svc.lastRoutedAgent
+	svc.mu.Unlock()
+	if got != "concierge" {
+		t.Fatalf("lastRoutedAgent = %q", got)
+	}
+}
 
 func TestTypingLoop_SendsWhenActive(t *testing.T) {
 	tmpDir := shortTempDir(t)
@@ -1738,4 +1813,92 @@ func TestHandleInbound_ExpectsResponse_TriggerFailStillDelivers(t *testing.T) {
 	if sendReq.Body != "hello despite trigger fail" {
 		t.Errorf("send body = %q, want 'hello despite trigger fail'", sendReq.Body)
 	}
+}
+
+type mockStream struct {
+	writes []string
+	closed bool
+	done   chan struct{}
+}
+
+func newMockStream() *mockStream {
+	return &mockStream{done: make(chan struct{})}
+}
+
+func (m *mockStream) Write(p []byte) (int, error) {
+	m.writes = append(m.writes, string(p))
+	return len(p), nil
+}
+func (m *mockStream) Close() error {
+	if !m.closed {
+		m.closed = true
+		close(m.done)
+	}
+	return nil
+}
+func (m *mockStream) Done() <-chan struct{} { return m.done }
+
+type mockStreamer struct {
+	mockSender
+	opened *mockStream
+}
+
+func (m *mockStreamer) OpenStream(_ context.Context) (bridge.MessageStream, error) {
+	m.opened = newMockStream()
+	return m.opened, nil
+}
+
+func TestSendStream_OpenWriteClose(t *testing.T) {
+	st := &mockStreamer{mockSender: mockSender{name: "tg"}}
+	svc := New([]bridge.Bridge{st}, "alice", "concierge", "", t.TempDir(), nil)
+
+	open := svc.handleStreamOpen(&message.Request{Type: "send_stream_open", From: "concierge"})
+	if !open.OK || open.StreamID == "" {
+		t.Fatalf("open = %+v", open)
+	}
+	write := svc.handleStreamWrite(&message.Request{Type: "send_stream_write", StreamID: open.StreamID, Body: "hello"})
+	if !write.OK {
+		t.Fatalf("write = %+v", write)
+	}
+	closeResp := svc.handleStreamClose(&message.Request{Type: "send_stream_close", StreamID: open.StreamID})
+	if !closeResp.OK {
+		t.Fatalf("close = %+v", closeResp)
+	}
+	if !st.opened.closed {
+		t.Fatal("stream not closed")
+	}
+	if len(st.opened.writes) != 1 || st.opened.writes[0] != "hello" {
+		t.Fatalf("writes = %v", st.opened.writes)
+	}
+}
+
+func TestSendStream_AbandonClearsMap(t *testing.T) {
+	st := &mockStreamer{mockSender: mockSender{name: "tg"}}
+	svc := New([]bridge.Bridge{st}, "alice", "concierge", "", t.TempDir(), nil)
+
+	open := svc.handleStreamOpen(&message.Request{Type: "send_stream_open", From: "concierge"})
+	if !open.OK {
+		t.Fatalf("open = %+v", open)
+	}
+	svc.mu.Lock()
+	n := len(svc.streams)
+	svc.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("streams after open = %d", n)
+	}
+	// Telegram-layer abandon closes the stream without handleStreamClose.
+	if err := st.opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		svc.mu.Lock()
+		n = len(svc.streams)
+		svc.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("stream map leaked after abandon, n=%d", n)
 }

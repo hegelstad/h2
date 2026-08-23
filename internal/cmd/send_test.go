@@ -1,10 +1,16 @@
 package cmd
 
 import (
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+
+	"h2/internal/session/message"
+	"h2/internal/socketdir"
 )
 
 func TestSendCmd_SelfSendBlocked(t *testing.T) {
@@ -157,6 +163,222 @@ func TestSend_ExpectsResponse_FailsOnSocket(t *testing.T) {
 	// Should be a connection error, not a validation error.
 	if !strings.Contains(err.Error(), "connect") && !strings.Contains(err.Error(), "socket") {
 		t.Fatalf("expected socket/connection error, got: %v", err)
+	}
+}
+
+func TestSend_StdinTTYRejected(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	cmd := newSendCmd()
+	cmd.SetArgs([]string{"telegram", "--stdin"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error when --stdin is a TTY or not a pipe")
+	}
+	// In this test environment stdin is typically a TTY or empty; either
+	// the TTY guard or a later socket error is acceptable only if TTY
+	// is not detected. Prefer the explicit TTY message when it fires.
+	if !strings.Contains(err.Error(), "TTY") && !strings.Contains(err.Error(), "pipe") &&
+		!strings.Contains(err.Error(), "socket") && !strings.Contains(err.Error(), "connect") &&
+		!strings.Contains(err.Error(), "stream") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHandleStdinSend_FallsBackWhenStreamUnknown(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	sockDir := socketdir.Dir()
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(sockDir, socketdir.Format(socketdir.TypeAgent, "old-agent"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	var mu sync.Mutex
+	var got []message.Request
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, rerr := message.ReadRequest(conn)
+			if rerr != nil {
+				conn.Close()
+				continue
+			}
+			mu.Lock()
+			got = append(got, *req)
+			mu.Unlock()
+			switch req.Type {
+			case "send_stream_open", "send_stream_write", "send_stream_close":
+				_ = message.SendResponse(conn, &message.Response{
+					Error: "unknown request type: " + req.Type,
+				})
+			case "send":
+				_ = message.SendResponse(conn, &message.Response{OK: true, MessageID: "fallback-id"})
+			default:
+				_ = message.SendResponse(conn, &message.Response{Error: "unknown request type: " + req.Type})
+			}
+			conn.Close()
+		}
+	}()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	wantBody := "troubleshoot: full stdin body\nline two"
+	if _, err := io.WriteString(w, wantBody); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	if err := handleStdinSend("old-agent", true); err != nil {
+		t.Fatalf("handleStdinSend: %v", err)
+	}
+
+	mu.Lock()
+	reqs := append([]message.Request(nil), got...)
+	mu.Unlock()
+	var sawOpen, sawSend bool
+	for _, req := range reqs {
+		switch req.Type {
+		case "send_stream_open":
+			sawOpen = true
+		case "send":
+			sawSend = true
+			if req.Body != wantBody {
+				t.Fatalf("send body = %q, want %q", req.Body, wantBody)
+			}
+		case "send_stream_write", "send_stream_close":
+			t.Fatalf("must not continue the stream protocol after unknown open, got %s", req.Type)
+		}
+	}
+	if !sawOpen {
+		t.Fatal("expected a send_stream_open probe")
+	}
+	if !sawSend {
+		t.Fatalf("expected ordinary send fallback, requests=%+v", reqs)
+	}
+}
+
+func TestHandleStdinSend_NewDaemonWritesInChunks(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "sender")
+
+	sockDir := socketdir.Dir()
+	if err := os.MkdirAll(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(sockDir, socketdir.Format(socketdir.TypeAgent, "new-agent"))
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	var mu sync.Mutex
+	var writes []string
+	var sawOrdinary bool
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			req, rerr := message.ReadRequest(conn)
+			if rerr != nil {
+				conn.Close()
+				continue
+			}
+			switch req.Type {
+			case "send_stream_open":
+				_ = message.SendResponse(conn, &message.Response{OK: true, StreamID: "s1"})
+			case "send_stream_write":
+				mu.Lock()
+				writes = append(writes, req.Body)
+				mu.Unlock()
+				_ = message.SendResponse(conn, &message.Response{OK: true})
+			case "send_stream_close":
+				_ = message.SendResponse(conn, &message.Response{OK: true, MessageID: "streamed"})
+			case "send":
+				mu.Lock()
+				sawOrdinary = true
+				mu.Unlock()
+				_ = message.SendResponse(conn, &message.Response{OK: true})
+			default:
+				_ = message.SendResponse(conn, &message.Response{Error: "unexpected " + req.Type})
+			}
+			conn.Close()
+		}
+	}()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = old })
+	payload := strings.Repeat("x", 5000)
+	if _, err := io.WriteString(w, payload); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+
+	if err := handleStdinSend("new-agent", true); err != nil {
+		t.Fatalf("handleStdinSend: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), writes...)
+	fellBack := sawOrdinary
+	mu.Unlock()
+	if fellBack {
+		t.Fatal("new daemon must not fall back to ordinary send")
+	}
+	if len(got) < 2 {
+		t.Fatalf("writes = %d, want at least 2 chunks, sizes=%v", len(got), chunkSizes(got))
+	}
+	var joined strings.Builder
+	for _, c := range got {
+		if len(c) > 4096 {
+			t.Fatalf("chunk len %d exceeds 4096", len(c))
+		}
+		joined.WriteString(c)
+	}
+	if joined.String() != payload {
+		t.Fatalf("joined writes != payload (got %d bytes)", joined.Len())
+	}
+}
+
+func chunkSizes(chunks []string) []int {
+	out := make([]int, len(chunks))
+	for i, c := range chunks {
+		out[i] = len(c)
+	}
+	return out
+}
+
+func TestIsUnknownRequestType(t *testing.T) {
+	if !isUnknownRequestType("unknown request type: send_stream_open") {
+		t.Fatal("should match listener wording")
+	}
+	if isUnknownRequestType("stream open: boom") {
+		t.Fatal("must not treat other errors as version skew")
 	}
 }
 
