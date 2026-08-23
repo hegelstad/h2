@@ -109,6 +109,13 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 
 	// Build a minimal RuntimeConfig for pre-launch harness resolution.
 	minRC := buildRoleRuntimeConfig(role)
+	// AgentName must be set here, not only on the full RC below: the crush
+	// harness keys its per-agent config dir (<prefix>/<profile>/<agent>/)
+	// and H2_ACTOR off it. Without the name, EnsureConfigDir writes to
+	// .../unnamed/ while the running agent reads .../<name>/ via
+	// XDG_CONFIG_HOME — i.e. a fresh launch would find no crush.json or
+	// CRUSH.md at all.
+	minRC.AgentName = name
 
 	// Resolve harness and ensure config directories exist.
 	h, err := harness.Resolve(minRC, nil)
