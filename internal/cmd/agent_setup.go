@@ -19,9 +19,16 @@ import (
 var forkDaemonFunc func(string, session.TerminalHints, bool) error = session.ForkDaemon
 
 // buildRoleRuntimeConfig builds a minimal RuntimeConfig from a Role, suitable
-// for pre-launch harness resolution (command name, config dir validation).
-// The full RuntimeConfig is constructed later with additional fields.
-func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
+// for pre-launch harness resolution (command name, config dir validation,
+// per-agent config-dir writes). The full RuntimeConfig is constructed later
+// with additional fields.
+//
+// name MUST be the resolved agent name: the crush harness derives its
+// per-agent config directory (<prefix>/<profile>/<name>/crush) from
+// rc.AgentName, so EnsureConfigDir and BuildCommandEnvVars both depend on it.
+// Passing an empty name here silently writes crush.json to a stray "unnamed"
+// directory that the launched agent never reads.
+func buildRoleRuntimeConfig(name string, role *config.Role) *config.RuntimeConfig {
 	ht := harness.CanonicalName(role.GetHarnessType())
 	command := role.GetAgentType()
 	if command == "" {
@@ -39,6 +46,7 @@ func buildRoleRuntimeConfig(role *config.Role) *config.RuntimeConfig {
 		harnessConfigPathPrefix = role.GetGrokConfigPathPrefix()
 	}
 	return &config.RuntimeConfig{
+		AgentName:               name,
 		HarnessType:             ht,
 		Command:                 command,
 		Model:                   role.GetModel(),
@@ -113,18 +121,20 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 	}
 
 	// Build a minimal RuntimeConfig for pre-launch harness resolution.
-	minRC := buildRoleRuntimeConfig(role)
+	// name is passed so per-agent harnesses (crush) write config to the same
+	// directory the launched agent reads via its XDG env.
+	minRC := buildRoleRuntimeConfig(name, role)
 
-	// Resolve harness and ensure config directories exist.
+	// Resolve harness (for command resolution) and validate the config dir.
+	// EnsureConfigDir is deferred until the full RuntimeConfig is built below:
+	// per-agent harnesses (crush) render their config from the role's
+	// SystemPrompt/Instructions/Model, which minRC does not carry.
 	h, err := harness.Resolve(minRC, nil)
 	if err != nil {
 		return fmt.Errorf("resolve harness: %w", err)
 	}
 	if err := validateHarnessConfigDirExists(role, minRC); err != nil {
 		return err
-	}
-	if err := h.EnsureConfigDir(config.ConfigDir()); err != nil {
-		return fmt.Errorf("ensure config dir: %w", err)
 	}
 
 	cwd, err := os.Getwd()
@@ -223,6 +233,18 @@ func doSetupAndForkAgent(name string, role *config.Role, detach bool, pod string
 	// Copy role-defined triggers and schedules.
 	rc.Triggers = append(rc.Triggers, role.Triggers...)
 	rc.Schedules = append(rc.Schedules, role.Schedules...)
+
+	// Ensure harness config directories exist, rendered from the full
+	// RuntimeConfig. Crush writes a per-agent crush.json (model pin) and
+	// CRUSH.md (role identity) here; both depend on rc fields absent from
+	// minRC (AgentName, SystemPrompt, Instructions, Model).
+	rcHarness, err := harness.Resolve(rc, nil)
+	if err != nil {
+		return fmt.Errorf("resolve harness: %w", err)
+	}
+	if err := rcHarness.EnsureConfigDir(config.ConfigDir()); err != nil {
+		return fmt.Errorf("ensure config dir: %w", err)
+	}
 
 	// Write RuntimeConfig before forking so the daemon can read it.
 	if err := config.WriteRuntimeConfig(sessionDir, rc); err != nil {
