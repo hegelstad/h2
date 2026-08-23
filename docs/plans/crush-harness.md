@@ -232,7 +232,7 @@ branch `feat/crush-harness` (design doc already pushed, commit 067eeeb).
    -buildvcs=false`; install to `~/go/bin/h2`; restart bridge + agents.
 3. PR-first per repo convention; never merge feat/* to main directly.
 Rollback: additive — revert the blank import; zero blast radius on
-claude/grok/codex/generic/opencode.
+claude/grok/codex/generic (opencode remains design-doc-only today).
 
 ## 9. Decisions (was §7 open questions — closed by review)
 
