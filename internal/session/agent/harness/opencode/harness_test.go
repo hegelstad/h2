@@ -1,6 +1,7 @@
 package opencode
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,8 +146,16 @@ func TestBuildCommandEnvVars_IsolatesConfigAndData(t *testing.T) {
 	if env["H2_BIN"] == "" {
 		t.Error("H2_BIN unset")
 	}
-	if env["OPENCODE_PERMISSION"] != "bypass" {
-		t.Errorf("OPENCODE_PERMISSION = %q", env["OPENCODE_PERMISSION"])
+	// OPENCODE_PERMISSION must be a valid JSON permission object (a bare string
+	// like "bypass" is silently ignored, leaving opencode on its hanging "ask"
+	// default). It must grant external_directory so headless agents can reach
+	// their h2 message queue / binary outside the project dir.
+	var perm map[string]string
+	if err := json.Unmarshal([]byte(env["OPENCODE_PERMISSION"]), &perm); err != nil {
+		t.Errorf("OPENCODE_PERMISSION is not valid JSON: %q (%v)", env["OPENCODE_PERMISSION"], err)
+	}
+	if perm["external_directory"] != "allow" {
+		t.Errorf("OPENCODE_PERMISSION external_directory = %q, want allow", perm["external_directory"])
 	}
 	if env["OPENCODE_DISABLE_AUTOUPDATE"] != "1" || env["OPENCODE_DISABLE_SHARE"] != "1" || env["OPENCODE_AUTO_SHARE"] != "0" {
 		t.Errorf("managed-agent flags: %#v", env)

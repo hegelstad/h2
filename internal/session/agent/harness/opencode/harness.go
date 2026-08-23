@@ -5,6 +5,7 @@ package opencode
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -105,10 +106,15 @@ func (h *OpencodeHarness) BuildCommandEnvVars(h2Dir string) map[string]string {
 	_ = h2Dir
 	cfg := h.configDir()
 	env := map[string]string{
-		"OPENCODE_PERMISSION":         "bypass",
 		"OPENCODE_DISABLE_AUTOUPDATE": "1",
 		"OPENCODE_DISABLE_SHARE":      "1",
 		"OPENCODE_AUTO_SHARE":         "0",
+	}
+	// OPENCODE_PERMISSION must be a JSON permission object, not a bare string
+	// ("bypass" was silently skipped as invalid JSON, leaving opencode on its
+	// default "ask" — which hangs headless agents). Mirror the config-file block.
+	if pj, err := json.Marshal(permissionConfig()); err == nil {
+		env["OPENCODE_PERMISSION"] = string(pj)
 	}
 	if h.rc != nil && h.rc.AgentName != "" {
 		env["H2_AGENT_NAME"] = h.rc.AgentName

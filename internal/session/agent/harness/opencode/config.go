@@ -73,6 +73,20 @@ func (h *OpencodeHarness) EnsureConfigDir(h2Dir string) error {
 	return nil
 }
 
+// permissionConfig returns opencode's permission settings for managed h2 agents.
+// Every tool is "allow" because these agents run non-interactively: an "ask"
+// has no user to answer it and blocks the turn forever. external_directory must
+// be allowed so agents can reach their h2 message queue and the h2 binary, which
+// live outside the project working directory.
+func permissionConfig() map[string]any {
+	return map[string]any{
+		"edit":               "allow",
+		"bash":               "allow",
+		"webfetch":           "allow",
+		"external_directory": "allow",
+	}
+}
+
 func renderConfigJSON(model string) ([]byte, error) {
 	model = strings.TrimSpace(model)
 	if model == "" {
@@ -86,6 +100,13 @@ func renderConfigJSON(model string) ([]byte, error) {
 		// model. opencode otherwise defaults these to a paid model, which errors
 		// on a free OpenRouter account ("requires more credits") and spams logs.
 		"small_model": model,
+		// Managed h2 agents run headless on a PTY with no interactive user, so any
+		// permission "ask" blocks the turn forever. Grant everything. Critically,
+		// h2 agents constantly touch paths outside their project dir (their message
+		// queue under $H2_DIR, the h2 binary), which opencode gates behind the
+		// "external_directory" permission — without allowing it the agent hangs the
+		// first time it reads its own inbox or runs `h2 send`.
+		"permission": permissionConfig(),
 		"provider": map[string]any{
 			"openrouter": map[string]any{
 				"options": map[string]any{
