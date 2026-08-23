@@ -58,6 +58,8 @@ func TestNotifyBridges(t *testing.T) {
 	t.Setenv("H2_DIR", dir)
 	config.ResetResolveCache()
 	t.Cleanup(config.ResetResolveCache)
+	socketdir.ResetDirCache()
+	t.Cleanup(socketdir.ResetDirCache)
 
 	if err := os.MkdirAll(socketdir.Dir(), 0o700); err != nil {
 		t.Fatal(err)
