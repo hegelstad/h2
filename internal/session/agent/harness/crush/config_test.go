@@ -55,6 +55,15 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 		t.Fatalf("read crush.json: %v", err)
 	}
 	var cfg struct {
+		Providers map[string]struct {
+			Type   string `json:"type"`
+			APIKey string `json:"api_key"`
+			Models []struct {
+				ID               string `json:"id"`
+				DefaultMaxTokens int    `json:"default_max_tokens"`
+				ContextWindow    int    `json:"context_window"`
+			} `json:"models"`
+		} `json:"providers"`
 		Models struct {
 			Large struct {
 				Model     string `json:"model"`
@@ -82,8 +91,21 @@ func TestEnsureConfigDir_WritesCrushJSONAndRoleFile(t *testing.T) {
 	if cfg.Models.Large.Model != defaultModelID {
 		t.Errorf("large.model = %q, want %q", cfg.Models.Large.Model, defaultModelID)
 	}
-	if cfg.Models.Large.Provider != "openrouter" {
-		t.Errorf("large.provider = %q, want openrouter", cfg.Models.Large.Provider)
+	// The custom provider entry is what pins max_tokens for run mode
+	// (v0.91.0 resolves models against the provider catalog; unknown ids
+	// silently fall back to a 64000-token default -> OpenRouter 402).
+	if len(cfg.Providers[ProviderID].Models) != 1 {
+		t.Fatalf("providers.%s.models: want exactly 1 entry, got %d", ProviderID, len(cfg.Providers[ProviderID].Models))
+	}
+	pm := cfg.Providers[ProviderID].Models[0]
+	if pm.ID != defaultModelID {
+		t.Errorf("providers.%s.models[0].id = %q, want %q", ProviderID, pm.ID, defaultModelID)
+	}
+	if pm.DefaultMaxTokens != DefaultMaxTokensLarge {
+		t.Errorf("providers.%s.models[0].default_max_tokens = %d, want %d (402 guard)", ProviderID, pm.DefaultMaxTokens, DefaultMaxTokensLarge)
+	}
+	if cfg.Models.Large.Provider != ProviderID {
+		t.Errorf("large.provider = %q, want custom provider %q", cfg.Models.Large.Provider, ProviderID)
 	}
 	if cfg.Models.Large.MaxTokens != DefaultMaxTokensLarge {
 		t.Errorf("large.max_tokens = %d, want %d (402 guard)", cfg.Models.Large.MaxTokens, DefaultMaxTokensLarge)
@@ -162,6 +184,15 @@ func TestEnsureConfigDir_RoleOverridesMaxTokens(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(filepath.Join(agentConfigDirFor(t, h), "crush.json"))
 	var cfg struct {
+		Providers map[string]struct {
+			Type   string `json:"type"`
+			APIKey string `json:"api_key"`
+			Models []struct {
+				ID               string `json:"id"`
+				DefaultMaxTokens int    `json:"default_max_tokens"`
+				ContextWindow    int    `json:"context_window"`
+			} `json:"models"`
+		} `json:"providers"`
 		Models struct {
 			Large struct {
 				MaxTokens int `json:"max_tokens"`
@@ -228,6 +259,15 @@ func TestEnsureConfigDir_HonorsRoleModel(t *testing.T) {
 		t.Fatalf("read crush.json: %v", err)
 	}
 	var cfg struct {
+		Providers map[string]struct {
+			Type   string `json:"type"`
+			APIKey string `json:"api_key"`
+			Models []struct {
+				ID               string `json:"id"`
+				DefaultMaxTokens int    `json:"default_max_tokens"`
+				ContextWindow    int    `json:"context_window"`
+			} `json:"models"`
+		} `json:"providers"`
 		Models struct {
 			Large struct {
 				Model string `json:"model"`

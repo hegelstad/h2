@@ -42,7 +42,7 @@ func TestBuildCommandArgs_Fresh(t *testing.T) {
 	h := New(&config.RuntimeConfig{AgentName: "a"}, nil)
 	got := h.BuildCommandArgs(nil, nil)
 	joined := strings.Join(got, " ")
-	for _, want := range []string{SupervisorSubcommand, "--data-dir"} {
+	for _, want := range []string{SupervisorSubcommand, "--data-dir", "--model"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("args %v missing %q", got, want)
 		}

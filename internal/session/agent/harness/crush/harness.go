@@ -116,6 +116,11 @@ func (h *CrushHarness) BuildCommandArgs(prependArgs, extraArgs []string) []strin
 	roleArgs = append(roleArgs, SupervisorSubcommand)
 	roleArgs = append(roleArgs, "--data-dir", dataDir)
 	roleArgs = append(roleArgs, "--session-file", filepath.Join(dataDir, "session-id"))
+	if m := modelFor(h.rc); m != "" {
+		// v0.91.0 run-mode ignores configured models without this; see
+		// Supervisor.Model.
+		roleArgs = append(roleArgs, "--model", m)
+	}
 	if host := os.Getenv("H2_CRUSH_HOST"); host != "" {
 		// Pin an explicit socket so a stray shared-server can never silently
 		// collect our runs via the box-wide default socket.

@@ -52,6 +52,11 @@ type Supervisor struct {
 	// HookBin overrides the h2 binary used for handle-hook (defaults to this
 	// process's own executable — no PATH dependency).
 	HookBin string
+	// Model is the model id passed as -m/--small-model on every run turn.
+	// v0.91.0 non-interactive runs override configured models with defaults
+	// unless the flag is given; combined with the custom provider entry in
+	// crush.json this pins both the model and its max_tokens.
+	Model string
 }
 
 // Run consumes delivered messages from stdin until EOF or ctx cancellation,
@@ -242,6 +247,13 @@ func (s *supervisor) runTurn(ctx context.Context, prompt string, stdout io.Write
 	args := []string{"run", "-q", "--data-dir", s.opts.DataDir}
 	if s.opts.Host != "" {
 		args = append(args, "--host", s.opts.Host)
+	}
+	if s.opts.Model != "" {
+		// Run-mode ignores configured models (uses defaults) unless the
+		// model is selected explicitly; the provider def in crush.json
+		// supplies default_max_tokens for the cap.
+		args = append(args, "-m", ProviderID+"/"+s.opts.Model)
+		args = append(args, "--small-model", ProviderID+"/"+s.opts.Model)
 	}
 	if sid := s.currentSessionID(); sid != "" {
 		args = append(args, "--session", sid)
