@@ -400,3 +400,52 @@ func TestGenShortID(t *testing.T) {
 		t.Fatal("expected different IDs")
 	}
 }
+
+func TestRegisterExpectsResponseTrigger_SpecHasDedupDefaults(t *testing.T) {
+	setupFakeHome(t)
+	t.Setenv("H2_ACTOR", "ox-scheduler")
+
+	var got *message.Request
+	sockPath := filepath.Join(socketdir.Dir(), socketdir.Format(socketdir.TypeAgent, "ox-coder"))
+	os.MkdirAll(filepath.Dir(sockPath), 0o755)
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		req, err := message.ReadRequest(conn)
+		if err != nil {
+			return
+		}
+		got = req
+		message.SendResponse(conn, &message.Response{OK: true, TriggerID: req.Trigger.ID})
+	}()
+	t.Cleanup(func() { ln.Close(); <-done })
+
+	id, err := registerExpectsResponseTrigger("ox-coder", "ox-scheduler", "a1b2c3d4")
+	if err != nil {
+		t.Fatalf("registerExpectsResponseTrigger: %v", err)
+	}
+	if id != "a1b2c3d4" {
+		t.Fatalf("expected id a1b2c3d4, got %s", id)
+	}
+
+	if got == nil || got.Trigger == nil {
+		t.Fatal("no trigger_add request received")
+	}
+	spec := got.Trigger
+	if spec.MaxFirings != defaultERTriggerMaxFirings {
+		t.Errorf("MaxFirings = %d, want %d (bounded reminder cap)", spec.MaxFirings, defaultERTriggerMaxFirings)
+	}
+	wantCooldown := defaultERTriggerCooldown.String()
+	if spec.Cooldown != wantCooldown {
+		t.Errorf("Cooldown = %q, want %q (gap between replays)", spec.Cooldown, wantCooldown)
+	}
+}

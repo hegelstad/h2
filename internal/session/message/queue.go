@@ -159,6 +159,27 @@ func (q *MessageQueue) Lookup(id string) *Message {
 	return q.allMessages[id]
 }
 
+// LookupByTriggerID returns the most recent expects-response message whose
+// TriggerID matches. Messages are keyed by uuid ID; the trigger ID lives in
+// a separate field, so this scans under the queue lock. Used by the daemon's
+// trigger consume-check to detect an answered obligation.
+func (q *MessageQueue) LookupByTriggerID(triggerID string) *Message {
+	if triggerID == "" {
+		return nil
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var found *Message
+	for _, msg := range q.allMessages {
+		if msg.TriggerID == triggerID && msg.ExpectsResponse {
+			if found == nil || msg.CreatedAt.After(found.CreatedAt) {
+				found = msg
+			}
+		}
+	}
+	return found
+}
+
 // PendingCount returns the number of undelivered messages.
 func (q *MessageQueue) PendingCount() int {
 	return q.Snapshot().Total()

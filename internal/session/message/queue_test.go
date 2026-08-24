@@ -246,6 +246,64 @@ func TestLookup(t *testing.T) {
 	}
 }
 
+func TestLookupByTriggerID(t *testing.T) {
+	q := NewMessageQueue()
+
+	// A uuid-keyed message stamped with a trigger ID (the real ER send path).
+	erMsg := newMsg("uuid-1234", PriorityNormal)
+	erMsg.ExpectsResponse = true
+	erMsg.TriggerID = "a1b2c3d4"
+	q.Enqueue(erMsg)
+
+	// Lookup by uuid must NOT find it via the trigger ID key path and vice
+	// versa: the trigger ID is a field, not the queue key.
+	if q.Lookup("a1b2c3d4") != nil {
+		t.Fatal("Lookup by trigger ID must not match (messages are uuid-keyed)")
+	}
+
+	got := q.LookupByTriggerID("a1b2c3d4")
+	if got == nil || got.ID != "uuid-1234" {
+		t.Fatalf("expected uuid-1234 via trigger ID scan, got %v", got)
+	}
+
+	if q.LookupByTriggerID("") != nil {
+		t.Fatal("empty trigger ID must return nil")
+	}
+	if q.LookupByTriggerID("nope") != nil {
+		t.Fatal("unknown trigger ID must return nil")
+	}
+}
+
+func TestLookupByTriggerID_RequiresExpectsResponse(t *testing.T) {
+	q := NewMessageQueue()
+	plain := newMsg("uuid-5678", PriorityNormal)
+	plain.TriggerID = "a1b2c3d4" // stamped but not an ER message
+	q.Enqueue(plain)
+
+	if got := q.LookupByTriggerID("a1b2c3d4"); got != nil {
+		t.Fatalf("non-ER message with same TriggerID must not match, got %v", got)
+	}
+}
+
+func TestLookupByTriggerID_MostRecentWins(t *testing.T) {
+	q := NewMessageQueue()
+	old := newMsg("uuid-old", PriorityNormal)
+	old.ExpectsResponse = true
+	old.TriggerID = "a1b2c3d4"
+	old.CreatedAt = time.Now().Add(-time.Hour)
+	q.Enqueue(old)
+
+	recent := newMsg("uuid-new", PriorityNormal)
+	recent.ExpectsResponse = true
+	recent.TriggerID = "a1b2c3d4"
+	q.Enqueue(recent)
+
+	got := q.LookupByTriggerID("a1b2c3d4")
+	if got == nil || got.ID != "uuid-new" {
+		t.Fatalf("expected most recent uuid-new, got %v", got)
+	}
+}
+
 func TestFullPriorityOrder(t *testing.T) {
 	q := NewMessageQueue()
 	q.Enqueue(newMsg("idle-1", PriorityIdle))

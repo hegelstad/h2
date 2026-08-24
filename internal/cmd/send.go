@@ -7,12 +7,24 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"h2/internal/session/message"
 	"h2/internal/socketdir"
+)
+
+const (
+	// defaultERTriggerMaxFirings caps how many times an expects-response
+	// idle reminder can fire. Previously 10, which flooded inboxes with
+	// identical reminders when an obligation went unanswered.
+	defaultERTriggerMaxFirings = 3
+
+	// defaultERTriggerCooldown is the minimum gap between two firings of
+	// the same expects-response reminder.
+	defaultERTriggerCooldown = 10 * time.Minute
 )
 
 func newSendCmd() *cobra.Command {
@@ -252,15 +264,17 @@ func registerExpectsResponseTrigger(agentName, sender, triggerID string) (string
 			"Reminder about message from %s (id: %s). Do not close this reminder when acknowledging, close it only when providing the full response that was requested. Close with: h2 send --closes %s %s \"your response\"",
 			sender, id, id, sender,
 		)
-		return &message.TriggerSpec{
+		spec := &message.TriggerSpec{
 			ID:         id,
 			Name:       "expects-response-" + id,
 			Event:      "state_change",
 			State:      "idle",
 			Message:    reminderMsg,
 			Priority:   "idle",
-			MaxFirings: 10,
+			MaxFirings: defaultERTriggerMaxFirings,
+			Cooldown:   defaultERTriggerCooldown.String(),
 		}
+		return spec
 	}
 
 	spec := buildSpec(triggerID)

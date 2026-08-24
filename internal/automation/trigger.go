@@ -21,6 +21,10 @@ type TriggerEngine struct {
 	runner        *ActionRunner
 	clock         Clock
 	stateProvider StateProvider
+	// consumeCheck, if set, is consulted before a matching trigger fires.
+	// Returning true consumes (removes) the trigger without firing — used
+	// for expects-response triggers whose obligation is already answered.
+	consumeCheck func(triggerID string) bool
 }
 
 // NewTriggerEngine creates a TriggerEngine that dispatches actions via the given runner.
@@ -40,6 +44,13 @@ func NewTriggerEngine(runner *ActionRunner, stateProvider ...StateProvider) *Tri
 // SetClock overrides the time source for testing.
 func (te *TriggerEngine) SetClock(c Clock) {
 	te.clock = c
+}
+
+// SetConsumeCheck installs a consume-check hook. See the consumeCheck field.
+func (te *TriggerEngine) SetConsumeCheck(fn func(triggerID string) bool) {
+	te.mu.Lock()
+	defer te.mu.Unlock()
+	te.consumeCheck = fn
 }
 
 // Run processes events from the channel until ctx is cancelled.
@@ -159,6 +170,16 @@ func (te *TriggerEngine) evalAndFire(ctx context.Context, t *Trigger, evt monito
 			te.mu.Unlock()
 			return
 		}
+	}
+
+	// Consume-check under lock: if the obligation behind this trigger is
+	// already satisfied (e.g. the message was answered), remove the trigger
+	// without firing. Checked here so a stale reminder goes quiet even when
+	// its state_change match keeps re-arming it.
+	if te.consumeCheck != nil && te.consumeCheck(t.ID) {
+		delete(te.triggers, t.ID)
+		te.mu.Unlock()
+		return
 	}
 	te.mu.Unlock()
 
