@@ -954,3 +954,96 @@ func TestResolveExpiresAt(t *testing.T) {
 		t.Fatal("expected error for invalid absolute timestamp")
 	}
 }
+
+func TestTriggerEngine_ConsumeCheckRemovesWithoutFiring(t *testing.T) {
+	clock := newMockClock(time.Now())
+	te, enq := newTestTriggerEngineWithClock(clock)
+	answered := map[string]bool{"a1b2c3d4": true}
+	te.SetConsumeCheck(func(id string) bool { return answered[id] })
+
+	te.Add(&Trigger{
+		ID:         "a1b2c3d4",
+		Event:      "state_change",
+		State:      "idle",
+		MaxFirings: -1,
+		Action:     Action{Message: "reminder"},
+	})
+
+	sendEvent(te, stateChangeEvent(monitor.StateIdle, monitor.SubStateNone))
+
+	if msgs := enq.getMessages(); len(msgs) != 0 {
+		t.Fatalf("consumed trigger must not fire, got %d messages", len(msgs))
+	}
+	for _, tr := range te.List() {
+		if tr.ID == "a1b2c3d4" {
+			t.Fatal("consumed trigger should have been removed")
+		}
+	}
+}
+
+func TestTriggerEngine_ConsumeCheckFalseFires(t *testing.T) {
+	clock := newMockClock(time.Now())
+	te, enq := newTestTriggerEngineWithClock(clock)
+	te.SetConsumeCheck(func(id string) bool { return false })
+
+	te.Add(&Trigger{
+		ID:         "t1",
+		Event:      "state_change",
+		State:      "idle",
+		MaxFirings: -1,
+		Action:     Action{Message: "reminder"},
+	})
+
+	sendEvent(te, stateChangeEvent(monitor.StateIdle, monitor.SubStateNone))
+	if msgs := enq.getMessages(); len(msgs) != 1 {
+		t.Fatalf("expected firing when consume check returns false, got %d", len(msgs))
+	}
+}
+
+func TestTriggerEngine_NilConsumeCheckFires(t *testing.T) {
+	te, enq := newTestTriggerEngine()
+	te.Add(&Trigger{
+		ID:         "t1",
+		Event:      "state_change",
+		State:      "idle",
+		MaxFirings: -1,
+		Action:     Action{Message: "reminder"},
+	})
+	sendEvent(te, stateChangeEvent(monitor.StateIdle, monitor.SubStateNone))
+	if msgs := enq.getMessages(); len(msgs) != 1 {
+		t.Fatalf("nil consume check must not block firing, got %d", len(msgs))
+	}
+}
+
+func TestTriggerEngine_ConsumedBeforeConditionEval(t *testing.T) {
+	clock := newMockClock(time.Now())
+	te, enq := newTestTriggerEngineWithClock(clock)
+	consumed := false
+	te.SetConsumeCheck(func(id string) bool { return consumed })
+
+	te.Add(&Trigger{
+		ID:        "t1",
+		Event:     "state_change",
+		State:     "idle",
+		Condition: "false",
+		Action:    Action{Message: "reminder"},
+	})
+
+	sendEvent(te, stateChangeEvent(monitor.StateIdle, monitor.SubStateNone))
+	if msgs := enq.getMessages(); len(msgs) != 0 {
+		t.Fatal("failing condition should not fire")
+	}
+
+	// Obligation answered while the trigger sat idle: next matching event
+	// consumes it instead of evaluating the condition again.
+	consumed = true
+	sendEvent(te, stateChangeEvent(monitor.StateIdle, monitor.SubStateNone))
+	for _, tr := range te.List() {
+		if tr.ID == "t1" {
+			t.Fatal("trigger should be consumed on next match after answer")
+		}
+	}
+	if msgs := enq.getMessages(); len(msgs) != 0 {
+		t.Fatalf("no message should fire after consumption, got %d", len(msgs))
+	}
+}

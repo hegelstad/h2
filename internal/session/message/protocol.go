@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -8,6 +9,11 @@ import (
 	"net"
 	"time"
 )
+
+// maxJSONLine is an upper bound on a single handshake / RPC JSON line.
+// json.Encoder writes compact one-line objects, so this only exists to
+// bound memory if a peer never sends a newline.
+const maxJSONLine = 4 << 20
 
 // Request is the JSON request sent over the Unix socket.
 type Request struct {
@@ -240,7 +246,7 @@ func SendRequest(conn net.Conn, req *Request) error {
 // ReadRequest reads a JSON-encoded request from a connection.
 func ReadRequest(conn net.Conn) (*Request, error) {
 	var req Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := decodeJSONLine(conn, &req); err != nil {
 		return nil, err
 	}
 	return &req, nil
@@ -254,10 +260,43 @@ func SendResponse(conn net.Conn, resp *Response) error {
 // ReadResponse reads a JSON-encoded response from a connection.
 func ReadResponse(conn net.Conn) (*Response, error) {
 	var resp Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := decodeJSONLine(conn, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
+}
+
+// decodeJSONLine reads exactly one newline-terminated JSON object.
+//
+// json.Decoder must not be used here: it buffers extra bytes from the
+// connection, and attach switches this socket to binary frames right
+// after the handshake. A buffered read can swallow the first screen
+// frames, so the client desyncs and drops back to the shell.
+func decodeJSONLine(r io.Reader, v any) error {
+	var buf bytes.Buffer
+	tmp := [1]byte{}
+	for buf.Len() < maxJSONLine {
+		n, err := r.Read(tmp[:])
+		if n > 0 {
+			_ = buf.WriteByte(tmp[0])
+			if tmp[0] == '\n' {
+				return json.Unmarshal(buf.Bytes(), v)
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				if buf.Len() == 0 {
+					return io.ErrUnexpectedEOF
+				}
+				// Encoder always writes a trailing newline; accept a
+				// final object without one so a close after the last
+				// byte still works.
+				return json.Unmarshal(buf.Bytes(), v)
+			}
+			return err
+		}
+	}
+	return fmt.Errorf("json line exceeds %d bytes", maxJSONLine)
 }
 
 // WriteFrame writes a framed message: [1 byte type][4 bytes big-endian length][payload].

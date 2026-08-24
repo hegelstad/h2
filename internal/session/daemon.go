@@ -230,6 +230,16 @@ func RunDaemon(sessionDir string, rc *config.RuntimeConfig, resume bool) error {
 	triggerEngine := automation.NewTriggerEngine(runner, stateProvider)
 	scheduleEngine := automation.NewScheduleEngine(runner, automation.WithStateProvider(stateProvider))
 
+	// Expects-response triggers self-consume once their message is answered:
+	// the trigger ID equals the annotated message ID, so a delivered message
+	// with that ID means the obligation is satisfied and any further idle
+	// reminders must not fire.
+	queue := s.Queue
+	triggerEngine.SetConsumeCheck(func(triggerID string) bool {
+		msg := queue.Lookup(triggerID)
+		return msg != nil && msg.ExpectsResponse && msg.Status == message.StatusDelivered
+	})
+
 	// Subscribe TriggerEngine to monitor events.
 	eventCh := s.monitor.Subscribe()
 

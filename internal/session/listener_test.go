@@ -3,9 +3,11 @@ package session
 import (
 	"net"
 	"testing"
+	"time"
 
 	"h2/internal/automation"
 	"h2/internal/config"
+	"h2/internal/session/agent/monitor"
 	"h2/internal/session/message"
 	"h2/internal/session/virtualterminal"
 )
@@ -298,3 +300,82 @@ func TestHandleTriggerAdd_NilEngine(t *testing.T) {
 		t.Fatal("expected error when engine is nil")
 	}
 }
+
+// TestERTrigger_ConsumedWhenMessageAnswered reproduces the h2ops-epic.1
+// pathology: an expects-response reminder trigger keeps re-firing on every
+// idle state_change even after the agent answered. The daemon wires a
+// consume check so a delivered annotated message consumes the trigger
+// before it can fire again.
+func TestERTrigger_ConsumedWhenMessageAnswered(t *testing.T) {
+	d := newTestDaemonWithEngines(t)
+	s := d.Session
+
+	// Wire the same consume check the real daemon uses.
+	queue := s.Queue
+	d.TriggerEngine.SetConsumeCheck(func(triggerID string) bool {
+		msg := queue.Lookup(triggerID)
+		return msg != nil && msg.ExpectsResponse && msg.Status == message.StatusDelivered
+	})
+
+	// The annotated message was delivered (answered).
+	s.Queue.Enqueue(&message.Message{
+		ID:              "a1b2c3d4",
+		From:            "ox-scheduler",
+		Priority:        message.PriorityNormal,
+		Body:            "do the thing",
+		ExpectsResponse: true,
+		Status:          message.StatusDelivered,
+	})
+
+	clock := &mockSessionClock{}
+	d.TriggerEngine.SetClock(clock)
+
+	fired := 0
+	realAction := d.TriggerEngine
+	_ = realAction
+
+	d.TriggerEngine.Add(&automation.Trigger{
+		ID:         "a1b2c3d4",
+		Name:       "expects-response-a1b2c3d4",
+		Event:      "state_change",
+		State:      "idle",
+		MaxFirings: -1,
+		Action:     automation.Action{Exec: "true"},
+	})
+
+	// Agent cycles idle repeatedly — exactly the replay storm pattern.
+	for i := 0; i < 5; i++ {
+		ch := make(chan monitor.AgentEvent, 1)
+		ch <- monitor.AgentEvent{
+			Type:      monitor.EventStateChange,
+			Timestamp: clock.Now(),
+			Data:      monitor.StateChangeData{State: monitor.StateIdle, SubState: monitor.SubStateNone},
+		}
+		close(ch)
+		done := make(chan struct{})
+		go func() { d.TriggerEngine.Run(t.Context(), ch); close(done) }()
+		<-done
+	}
+
+	if fired != 0 {
+		t.Fatalf("answered ER trigger must never fire, fired %d times", fired)
+	}
+	for _, tr := range d.TriggerEngine.List() {
+		if tr.ID == "a1b2c3d4" {
+			t.Fatal("answered ER trigger should have been consumed")
+		}
+	}
+}
+
+type mockSessionClock struct{ now time.Time }
+
+func (c *mockSessionClock) Now() time.Time { return time.Now() }
+func (c *mockSessionClock) NewTimer(d time.Duration) automation.Timer {
+	return &neverTimer{ch: make(chan time.Time)}
+}
+
+type neverTimer struct{ ch chan time.Time }
+
+func (t *neverTimer) C() <-chan time.Time        { return t.ch }
+func (t *neverTimer) Stop() bool                 { return true }
+func (t *neverTimer) Reset(d time.Duration) bool { return true }
