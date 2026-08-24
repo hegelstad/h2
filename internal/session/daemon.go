@@ -231,13 +231,14 @@ func RunDaemon(sessionDir string, rc *config.RuntimeConfig, resume bool) error {
 	scheduleEngine := automation.NewScheduleEngine(runner, automation.WithStateProvider(stateProvider))
 
 	// Expects-response triggers self-consume once their message is answered:
-	// the trigger ID equals the annotated message ID, so a delivered message
-	// with that ID means the obligation is satisfied and any further idle
-	// reminders must not fire.
+	// the trigger ID is stamped on the annotated message, so a delivered
+	// expects-response message carrying that trigger ID means the obligation
+	// is satisfied and any further idle reminders must not fire. Messages
+	// are keyed by uuid, hence the TriggerID scan rather than Lookup.
 	queue := s.Queue
 	triggerEngine.SetConsumeCheck(func(triggerID string) bool {
-		msg := queue.Lookup(triggerID)
-		return msg != nil && msg.ExpectsResponse && msg.Status == message.StatusDelivered
+		msg := queue.LookupByTriggerID(triggerID)
+		return msg != nil && msg.Status == message.StatusDelivered
 	})
 
 	// Subscribe TriggerEngine to monitor events.

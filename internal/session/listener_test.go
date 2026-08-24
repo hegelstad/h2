@@ -305,7 +305,9 @@ func TestHandleTriggerAdd_NilEngine(t *testing.T) {
 // pathology: an expects-response reminder trigger keeps re-firing on every
 // idle state_change even after the agent answered. The daemon wires a
 // consume check so a delivered annotated message consumes the trigger
-// before it can fire again.
+// before it can fire again. The queue entry is built through the REAL send
+// path (PrepareMessage with ExpectsResponse + TriggerID) so the test pins
+// the actual uuid-key/TriggerID-field linkage, not an artificial one.
 func TestERTrigger_ConsumedWhenMessageAnswered(t *testing.T) {
 	d := newTestDaemonWithEngines(t)
 	s := d.Session
@@ -313,26 +315,32 @@ func TestERTrigger_ConsumedWhenMessageAnswered(t *testing.T) {
 	// Wire the same consume check the real daemon uses.
 	queue := s.Queue
 	d.TriggerEngine.SetConsumeCheck(func(triggerID string) bool {
-		msg := queue.Lookup(triggerID)
-		return msg != nil && msg.ExpectsResponse && msg.Status == message.StatusDelivered
+		msg := queue.LookupByTriggerID(triggerID)
+		return msg != nil && msg.Status == message.StatusDelivered
 	})
 
-	// The annotated message was delivered (answered).
-	s.Queue.Enqueue(&message.Message{
-		ID:              "a1b2c3d4",
-		From:            "ox-scheduler",
-		Priority:        message.PriorityNormal,
-		Body:            "do the thing",
-		ExpectsResponse: true,
-		Status:          message.StatusDelivered,
-	})
+	// A message arrives with --expects-response: PrepareMessage stamps
+	// TriggerID on a uuid-keyed message. It is then delivered (answered).
+	msgID, err := message.PrepareMessage(s.Queue, s.Name(), "ox-scheduler", "do the thing",
+		message.PriorityNormal, message.PrepareOpts{
+			ExpectsResponse: true,
+			TriggerID:       "a1b2c3d4",
+		})
+	if err != nil {
+		t.Fatalf("PrepareMessage: %v", err)
+	}
+	if msgID == "a1b2c3d4" {
+		t.Fatal("precondition: message ID must be a uuid, not the trigger ID")
+	}
+	ansMsg := queue.Lookup(msgID)
+	if ansMsg == nil || !ansMsg.ExpectsResponse || ansMsg.TriggerID != "a1b2c3d4" {
+		t.Fatalf("queued message missing ER linkage: %+v", ansMsg)
+	}
+	now := time.Now()
+	ansMsg.Status = message.StatusDelivered
+	ansMsg.DeliveredAt = &now
 
-	clock := &mockSessionClock{}
-	d.TriggerEngine.SetClock(clock)
-
-	fired := 0
-	realAction := d.TriggerEngine
-	_ = realAction
+	d.TriggerEngine.SetClock(&mockSessionClock{})
 
 	d.TriggerEngine.Add(&automation.Trigger{
 		ID:         "a1b2c3d4",
@@ -348,7 +356,7 @@ func TestERTrigger_ConsumedWhenMessageAnswered(t *testing.T) {
 		ch := make(chan monitor.AgentEvent, 1)
 		ch <- monitor.AgentEvent{
 			Type:      monitor.EventStateChange,
-			Timestamp: clock.Now(),
+			Timestamp: time.Now(),
 			Data:      monitor.StateChangeData{State: monitor.StateIdle, SubState: monitor.SubStateNone},
 		}
 		close(ch)
@@ -357,14 +365,68 @@ func TestERTrigger_ConsumedWhenMessageAnswered(t *testing.T) {
 		<-done
 	}
 
-	if fired != 0 {
-		t.Fatalf("answered ER trigger must never fire, fired %d times", fired)
-	}
 	for _, tr := range d.TriggerEngine.List() {
 		if tr.ID == "a1b2c3d4" {
 			t.Fatal("answered ER trigger should have been consumed")
 		}
 	}
+}
+
+// TestERTrigger_UnansweredStillFires guards against over-consumption: with
+// the same real send path but the message NOT yet delivered, the reminder
+// must still fire.
+func TestERTrigger_UnansweredStillFires(t *testing.T) {
+	d := newTestDaemonWithEngines(t)
+	s := d.Session
+
+	queue := s.Queue
+	d.TriggerEngine.SetConsumeCheck(func(triggerID string) bool {
+		msg := queue.LookupByTriggerID(triggerID)
+		return msg != nil && msg.Status == message.StatusDelivered
+	})
+
+	_, err := message.PrepareMessage(s.Queue, s.Name(), "ox-scheduler", "do the thing",
+		message.PriorityNormal, message.PrepareOpts{
+			ExpectsResponse: true,
+			TriggerID:       "b2c3d4e5",
+		})
+	if err != nil {
+		t.Fatalf("PrepareMessage: %v", err)
+	}
+
+	clock := &mockSessionClock{}
+	d.TriggerEngine.SetClock(clock)
+
+	d.TriggerEngine.Add(&automation.Trigger{
+		ID:         "b2c3d4e5",
+		Name:       "expects-response-b2c3d4e5",
+		Event:      "state_change",
+		State:      "idle",
+		MaxFirings: -1,
+		Action:     automation.Action{Exec: "true"},
+	})
+
+	ch := make(chan monitor.AgentEvent, 1)
+	ch <- monitor.AgentEvent{
+		Type:      monitor.EventStateChange,
+		Timestamp: time.Now(),
+		Data:      monitor.StateChangeData{State: monitor.StateIdle, SubState: monitor.SubStateNone},
+	}
+	close(ch)
+	done := make(chan struct{})
+	go func() { d.TriggerEngine.Run(t.Context(), ch); close(done) }()
+	<-done
+
+	found := false
+	for _, tr := range d.TriggerEngine.List() {
+		if tr.ID == "b2c3d4e5" && tr.FireCount == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("unanswered ER trigger should still fire exactly once")
+	}
+
 }
 
 type mockSessionClock struct{ now time.Time }
