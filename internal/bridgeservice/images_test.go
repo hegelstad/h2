@@ -143,7 +143,7 @@ func TestTelegramImageRoundTrip(t *testing.T) {
 		}
 	}))
 	defer api.Close()
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	agentSocket := filepath.Join(dir, socketdir.Format(socketdir.TypeAgent, "test-agent"))
 	ln, err := net.Listen("unix", agentSocket)
 	if err != nil {
