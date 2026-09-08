@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"h2/internal/bridge"
 	"log"
 	"net/http"
 	"net/url"
@@ -11,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"h2/internal/bridge"
 )
 
 var (
@@ -70,7 +69,7 @@ func (t *Telegram) apiURL(method string) string {
 // Telegram's 4096-character limit are split into multiple messages at line
 // boundaries when possible, up to maxPages messages.
 func (t *Telegram) Send(ctx context.Context, text string) error {
-	chunks := bridge.SplitMessage(text, maxMessageLen, maxPages)
+	chunks := renderMessages(text)
 	for _, chunk := range chunks {
 		if err := t.sendChunk(ctx, chunk); err != nil {
 			return err
@@ -79,11 +78,19 @@ func (t *Telegram) Send(ctx context.Context, text string) error {
 	return nil
 }
 
-func (t *Telegram) sendChunk(ctx context.Context, text string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(url.Values{
+func (t *Telegram) sendChunk(ctx context.Context, message formattedMessage) error {
+	fields := url.Values{
 		"chat_id": {strconv.FormatInt(t.ChatID, 10)},
-		"text":    {text},
-	}.Encode()))
+		"text":    {message.Text},
+	}
+	if len(message.Entities) > 0 {
+		encoded, err := json.Marshal(message.Entities)
+		if err != nil {
+			return fmt.Errorf("telegram send: encode entities: %w", err)
+		}
+		fields.Set("entities", string(encoded))
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.apiURL("sendMessage"), strings.NewReader(fields.Encode()))
 	if err != nil {
 		return fmt.Errorf("telegram send: invalid endpoint")
 	}
