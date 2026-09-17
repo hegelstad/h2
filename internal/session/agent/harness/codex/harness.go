@@ -4,11 +4,14 @@
 package codex
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/google/uuid"
 
 	"h2/internal/activitylog"
 	"h2/internal/config"
@@ -45,6 +48,7 @@ type CodexHarness struct {
 	// discovery callback never blocks and the path survives if it fires before
 	// Start()'s tailer goroutine is waiting.
 	sessionLogPathCh chan string
+	sessionLogPath   string // Accessed by serialized conversation callbacks only.
 }
 
 // New creates a CodexHarness.
@@ -147,6 +151,11 @@ func (h *CodexHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, erro
 	sessionID := h.rc.SessionID
 	debugPath := resolveDebugPath(agentName, sessionID)
 	h.eventHandler.ConfigureDebug(debugPath)
+	var allowSwitch func(string) bool
+	if h.rc.HarnessConfigDir() != "" {
+		allowSwitch = func(id string) bool { return h.nativeConversationLog(id) != "" }
+	}
+	h.eventHandler.ConfigureConversations(h.rc.ResumeSessionID, allowSwitch)
 
 	// Register callback to discover native session log path when the
 	// conversation ID arrives. Codex log files are at:
@@ -154,24 +163,26 @@ func (h *CodexHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, erro
 	// We glob for the file by conversation ID suffix.
 	h.eventHandler.SetOnConversationStarted(func(convID string) {
 		configDir := h.rc.HarnessConfigDir()
-		if configDir == "" || convID == "" {
+		path := h.nativeConversationLog(convID)
+		if path == "" {
 			return
 		}
-		pattern := filepath.Join(configDir, "sessions", "*", "*", "*", "*-"+convID+".jsonl")
-		matches, err := filepath.Glob(pattern)
-		if err != nil || len(matches) == 0 {
-			return
-		}
-		// Use the first match. Compute suffix relative to configDir.
-		rel, err := filepath.Rel(configDir, matches[0])
-		if err != nil {
+		rel, err := filepath.Rel(configDir, path)
+		if err != nil || path == h.sessionLogPath {
 			return
 		}
 		h.rc.NativeLogPathSuffix = rel
-		// Hand the full rollout path to the tailer (non-blocking; first wins).
+		h.sessionLogPath = path
+		// The parser serializes callbacks. Keep the newest primary /new path
+		// even if the tailer has not yet consumed the previous notification.
 		select {
-		case h.sessionLogPathCh <- matches[0]:
+		case h.sessionLogPathCh <- path:
 		default:
+			select {
+			case <-h.sessionLogPathCh:
+			default:
+			}
+			h.sessionLogPathCh <- path
 		}
 	})
 
@@ -190,6 +201,60 @@ func (h *CodexHarness) PrepareForLaunch(dryRun bool) (harness.LaunchConfig, erro
 			"-c", fmt.Sprintf(`otel.exporter={otlp-http={endpoint="%s",protocol="json"}}`, endpoint),
 		},
 	}, nil
+}
+
+// nativeConversationLog accepts only a matching, persistent top-level rollout.
+// Ephemeral TUI title threads have no rollout; persisted subagents are not the
+// user's primary conversation either. Read only the session_meta header.
+func (h *CodexHarness) nativeConversationLog(id string) string {
+	dir := h.rc.HarnessConfigDir()
+	if dir == "" {
+		return ""
+	}
+	if _, err := uuid.Parse(id); err != nil {
+		return ""
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "sessions", "*", "*", "*", "*-"+id+".jsonl"))
+	if len(matches) != 1 {
+		return ""
+	}
+	f, err := os.Open(matches[0])
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	s := bufio.NewScanner(f)
+	s.Buffer(nil, 1024*1024)
+	if !s.Scan() {
+		return ""
+	}
+	var header struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID             string          `json:"id"`
+			SessionID      string          `json:"session_id"`
+			Source         json.RawMessage `json:"source"`
+			ThreadSource   string          `json:"thread_source"`
+			ParentThreadID string          `json:"parent_thread_id"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(s.Bytes(), &header) != nil || header.Type != "session_meta" {
+		return ""
+	}
+	meta := header.Payload
+	if meta.ID == "" {
+		meta.ID = meta.SessionID // Older Codex rollout headers.
+	}
+	if meta.ID != id || meta.ParentThreadID != "" || (meta.ThreadSource != "" && meta.ThreadSource != "user") {
+		return ""
+	}
+	if len(meta.Source) != 0 {
+		var source string
+		if json.Unmarshal(meta.Source, &source) != nil || (source != "cli" && source != "exec") {
+			return ""
+		}
+	}
+	return matches[0]
 }
 
 // --- Runtime (called after child process starts) ---
@@ -221,20 +286,32 @@ func (h *CodexHarness) Start(ctx context.Context, events chan<- monitor.AgentEve
 // it skips existing content so the prior conversation isn't replayed as new
 // activity.
 func (h *CodexHarness) tailSessionLog(ctx context.Context) {
-	var path string
-	select {
-	case path = <-h.sessionLogPathCh:
-	case <-ctx.Done():
-		return
+	var cancel context.CancelFunc
+	var done chan struct{}
+	stop := func() {
+		if cancel != nil {
+			cancel()
+			<-done
+		}
 	}
-	if path == "" {
-		return
+	defer stop()
+	first := true
+	for {
+		select {
+		case path := <-h.sessionLogPathCh:
+			stop()
+			childCtx, childCancel := context.WithCancel(ctx)
+			cancel, done = childCancel, make(chan struct{})
+			collector := sessionlogcollector.New(path, h.eventHandler.OnSessionLogLine)
+			if first && h.rc.ResumeSessionID != "" {
+				collector = sessionlogcollector.NewTailOnly(path, h.eventHandler.OnSessionLogLine)
+			}
+			first = false
+			go func(done chan struct{}) { defer close(done); collector.Run(childCtx) }(done)
+		case <-ctx.Done():
+			return
+		}
 	}
-	if h.rc.ResumeSessionID != "" {
-		sessionlogcollector.NewTailOnly(path, h.eventHandler.OnSessionLogLine).Run(ctx)
-		return
-	}
-	sessionlogcollector.New(path, h.eventHandler.OnSessionLogLine).Run(ctx)
 }
 
 // HandleHookEvent returns false — Codex doesn't use h2 hooks.

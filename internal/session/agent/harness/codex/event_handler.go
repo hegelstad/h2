@@ -44,6 +44,12 @@ type EventHandler struct {
 	// onConversationStarted is called when conversation.id is discovered.
 	// The harness uses this to discover the native session log path.
 	onConversationStarted func(conversationID string)
+
+	// One TUI also emits telemetry for ephemeral title/helper threads. Keep
+	// those out of the primary agent's identity, activity and token accounting.
+	conversationMu          sync.Mutex
+	conversationID          string
+	allowConversationSwitch func(conversationID string) bool
 }
 
 var codexIdleDebounceDelay = 200 * time.Millisecond
@@ -62,6 +68,14 @@ func NewEventHandler(events chan<- monitor.AgentEvent) *EventHandler {
 // conversation.id is first discovered from OTEL events.
 func (p *EventHandler) SetOnConversationStarted(fn func(conversationID string)) {
 	p.onConversationStarted = fn
+}
+
+// ConfigureConversations seeds an explicit resume ID and supplies the native
+// rollout check used to distinguish a real /new thread from a temporary helper.
+// Call before starting the telemetry server.
+func (p *EventHandler) ConfigureConversations(id string, allowSwitch func(string) bool) {
+	p.conversationID = id
+	p.allowConversationSwitch = allowSwitch
 }
 
 // ConfigureDebug sets the debug log path and eagerly initializes the file.
@@ -191,27 +205,33 @@ type spanProcessResult struct {
 }
 
 func (p *EventHandler) processEvent(name string, attrs []otelAttribute, ts time.Time) spanProcessResult {
+	p.conversationMu.Lock()
+	defer p.conversationMu.Unlock()
+	id := getAttr(attrs, "conversation.id")
+	if name == "codex.conversation_starts" && id == "" {
+		return spanProcessResult{recognized: true}
+	}
+	if id != "" && id != p.conversationID {
+		if p.allowConversationSwitch != nil {
+			if !p.allowConversationSwitch(id) {
+				return spanProcessResult{recognized: true}
+			}
+		} else if p.conversationID != "" || name != "codex.conversation_starts" {
+			return spanProcessResult{recognized: true}
+		}
+		p.conversationID = id
+		// A /new rollout may be written after its conversation_starts log.
+		// Recover identity on the next event rather than permanently caching
+		// that thread as a helper or guessing from another session's log.
+		if name != "codex.conversation_starts" {
+			p.conversationStarted(id, getAttr(attrs, "model"), ts)
+		}
+	}
 	switch name {
 	case "codex.conversation_starts":
-		p.cancelPendingIdle()
-		p.resetTokenBaselines()
 		convID := getAttr(attrs, "conversation.id")
 		model := getAttr(attrs, "model")
-		// Call onConversationStarted BEFORE emitting the SessionStarted event
-		// so that NativeLogPathSuffix is set on the RC before the daemon's
-		// OnSessionStarted callback writes it to disk.
-		if p.onConversationStarted != nil && convID != "" {
-			p.onConversationStarted(convID)
-		}
-		p.emit(monitor.AgentEvent{
-			Type:      monitor.EventSessionStarted,
-			Timestamp: ts,
-			Data: monitor.SessionStartedData{
-				SessionID: convID,
-				Model:     model,
-			},
-		})
-		p.emitStateChange(ts, monitor.StateIdle, monitor.SubStateNone)
+		p.conversationStarted(convID, model, ts)
 		p.debugf("span=codex.conversation_starts conversation.id=%q model=%q", convID, model)
 		return spanProcessResult{recognized: true, emitted: 2}
 
@@ -401,6 +421,20 @@ func (p *EventHandler) processEvent(name string, attrs []otelAttribute, ts time.
 	}
 	p.debugf("event=%q (unknown)", name)
 	return spanProcessResult{}
+}
+
+func (p *EventHandler) conversationStarted(id, model string, ts time.Time) {
+	p.cancelPendingIdle()
+	p.resetTokenBaselines()
+	// Persist the rollout path before publishing the native identity.
+	if p.onConversationStarted != nil && id != "" {
+		p.onConversationStarted(id)
+	}
+	p.emit(monitor.AgentEvent{
+		Type: monitor.EventSessionStarted, Timestamp: ts,
+		Data: monitor.SessionStartedData{SessionID: id, Model: model},
+	})
+	p.emitStateChange(ts, monitor.StateIdle, monitor.SubStateNone)
 }
 
 // SignalInterrupt updates internal Codex parser state so in-flight OTEL events
