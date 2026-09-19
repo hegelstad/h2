@@ -14,11 +14,16 @@ import (
 var h2Binary string
 
 func TestMain(m *testing.M) {
+	os.Exit(runExternalTests(m.Run))
+}
+
+// Return the exit code so deferred cleanup runs before TestMain calls os.Exit.
+func runExternalTests(run func() int) int {
 	// Build h2 binary into a temp directory.
 	tmp, err := os.MkdirTemp("", "h2-e2e-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: create temp dir: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	defer os.RemoveAll(tmp)
 
@@ -29,10 +34,10 @@ func TestMain(m *testing.M) {
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: build h2: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 
-	os.Exit(m.Run())
+	return run()
 }
 
 func mustGetwd() string {
