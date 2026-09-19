@@ -65,6 +65,42 @@ func testRC(name, command string, args []string) *config.RuntimeConfig {
 	}
 }
 
+func TestCodexInputReady(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		screen string
+		paste  bool
+		want   bool
+	}{
+		{"startup draft", "\x1b[2;1H› \x1b[2;3H", true, false},
+		{"ready", "\x1b[2;1H› \x1b[4;1Hmodel · directory\x1b[2;3H", true, true},
+		{"no paste mode", "\x1b[2;1H› \x1b[4;1H100% context left\x1b[2;3H", false, false},
+		{"hidden menu cursor", "\x1b[2;1H› 1. Update\x1b[4;1HPress enter\x1b[2;3H\x1b[?25l", true, false},
+		{"not a prompt", "\x1b[2;1HResuming session…\x1b[4;1Hother text\x1b[2;3H", true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			vt := midterm.NewTerminal(8, 80)
+			vt.Write([]byte("\x1b[?25h" + tt.screen))
+			s := &Session{
+				RC: &config.RuntimeConfig{HarnessType: "codex"},
+				VT: &virtualterminal.VT{Vt: vt, BracketedPasteEnabled: tt.paste},
+			}
+			if got := s.readyForInput(); got != tt.want {
+				t.Fatalf("readyForInput = %v, want %v", got, tt.want)
+			}
+			if tt.want {
+				vt.Write([]byte("\x1b[2J\x1b[?25l"))
+				if !s.readyForInput() {
+					t.Fatal("an active turn/overlay must not revoke startup readiness")
+				}
+			}
+		})
+	}
+	if !(&Session{RC: &config.RuntimeConfig{HarnessType: "generic"}}).readyForInput() {
+		t.Fatal("non-Codex harnesses must not be gated")
+	}
+}
+
 func TestStateTransitions_ActiveToIdle(t *testing.T) {
 	setFastIdle(t)
 	s := NewFromConfig(testRC("test", "true", nil))

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -49,6 +50,7 @@ type Session struct {
 	Client           *client.Client // primary/interactive client (nil in daemon-only)
 	Clients          []*client.Client
 	clientsMu        sync.Mutex
+	codexInputReady  bool           // guarded by VT.Mu; reset for each child
 	PassthroughOwner *client.Client // which client owns passthrough mode (nil = none)
 
 	// prependArgs holds CLI args from the adapter's launch config
@@ -688,21 +690,22 @@ func (s *Session) lifecycleLoop(stopStatus chan struct{}, interactive bool) erro
 				s.Stop()
 				return err
 			}
-			s.VT.Vt = midterm.NewTerminal(s.VT.ChildRows, s.VT.Cols)
-			s.VT.SetupScrollCapture()
-			if interactive {
-				s.VT.Vt.ForwardRequests = os.Stdout
-			}
-			s.VT.Vt.ForwardResponses = s.VT.Ptm
-			s.VT.Scrollback = midterm.NewTerminal(s.VT.ChildRows, s.VT.Cols)
-			s.VT.Scrollback.AutoResizeY = true
-			s.VT.Scrollback.AppendOnly = true
-			s.VT.ResetScanState()
-			s.VT.ResetScrollHistory()
 
 			func() {
 				s.VT.Mu.Lock()
 				defer s.VT.Mu.Unlock()
+				s.VT.Vt = midterm.NewTerminal(s.VT.ChildRows, s.VT.Cols)
+				s.VT.SetupScrollCapture()
+				if interactive {
+					s.VT.Vt.ForwardRequests = os.Stdout
+				}
+				s.VT.Vt.ForwardResponses = s.VT.Ptm
+				s.VT.Scrollback = midterm.NewTerminal(s.VT.ChildRows, s.VT.Cols)
+				s.VT.Scrollback.AutoResizeY = true
+				s.VT.Scrollback.AppendOnly = true
+				s.VT.ResetScrollHistory()
+				s.VT.ResetScanState()
+				s.codexInputReady = false
 				s.VT.ChildExited = false
 				s.VT.ChildHung = false
 				s.VT.ExitError = nil
@@ -884,12 +887,43 @@ func (s *Session) SubmitInput(text string, priority message.Priority) {
 	s.Queue.Enqueue(msg)
 }
 
+// readyForInput distinguishes Codex's non-submitting startup draft from its
+// live composer: the latter has a visible prompt cursor and a footer below it.
+// Cache per child so active turns and temporary overlays do not gate steering.
+func (s *Session) readyForInput() bool {
+	if s.RC.HarnessType != "codex" {
+		return true
+	}
+	s.VT.Mu.Lock()
+	defer s.VT.Mu.Unlock()
+	if s.codexInputReady {
+		return true
+	}
+	vt := s.VT.Vt
+	if !s.VT.BracketedPasteEnabled || s.VT.SyncOutputActive || vt == nil || !vt.CursorVisible {
+		return false
+	}
+	y := vt.Cursor.Y
+	if y < 0 || y >= len(vt.Content) || !strings.HasPrefix(strings.TrimSpace(string(vt.Content[y])), "›") {
+		return false
+	}
+	for _, row := range vt.Content[y+1:] {
+		if strings.TrimSpace(string(row)) != "" {
+			s.codexInputReady = true
+			return true
+		}
+	}
+	return false
+}
+
 // StartServices launches the delivery goroutine. Blocks until Stop is called.
 func (s *Session) StartServices() {
 	message.RunDelivery(message.DeliveryConfig{
-		Queue:     s.Queue,
-		AgentName: s.RC.AgentName,
-		PtyWriter: s.PtyWriter(),
+		Queue:          s.Queue,
+		AgentName:      s.RC.AgentName,
+		PtyWriter:      s.PtyWriter(),
+		BracketedPaste: s.RC.HarnessType == "codex",
+		IsReady:        s.readyForInput,
 		IsIdle: func() bool {
 			st, _ := s.State()
 			return st == monitor.StateIdle

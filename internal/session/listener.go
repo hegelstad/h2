@@ -207,6 +207,7 @@ func (d *Daemon) handleRelaunch(conn net.Conn, req *message.Request) {
 	// Kill the child process. The lifecycle loop will detect the exit,
 	// see relaunchWithSetup=true, re-read config, re-setup harness, and
 	// start a new child.
+	s.Queue.Pause()
 	s.VT.KillChild()
 
 	// Signal relaunchCh so the lifecycle loop auto-relaunches instead of

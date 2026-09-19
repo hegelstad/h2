@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +30,102 @@ func (b *threadSafeBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func TestDeliver_BracketedPaste(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		msg  Message
+		want string
+	}{
+		{"inline", Message{Body: "hello", FilePath: "/tmp/message", Header: "h2 message"}, "[h2 message] hello"},
+		{"multiline", Message{Body: "first\nsecond", FilePath: "/tmp/message", Header: "h2 message"}, "[h2 message] first\nsecond"},
+		{"file", Message{Body: strings.Repeat("x", 301), FilePath: "/tmp/message", Header: "h2 message"}, "[h2 message] Read /tmp/message"},
+		{"user", Message{Body: "typed input"}, "typed input"},
+		{"raw", Message{Body: "\r", Raw: true}, "\r"},
+	} {
+		for _, enabled := range []bool{false, true} {
+			mode := "plain"
+			if enabled {
+				mode = "paste"
+			}
+			t.Run(tt.name+"/"+mode, func(t *testing.T) {
+				var buf bytes.Buffer
+				msg := tt.msg
+				deliver(DeliveryConfig{PtyWriter: &buf, BracketedPaste: enabled}, &msg)
+				want := tt.want
+				if enabled && !msg.Raw {
+					want = "\x1b[200~" + want + "\x1b[201~"
+				}
+				if got := buf.String(); got != want+"\r" {
+					t.Fatalf("PTY input = %q, want %q", got, want+"\r")
+				}
+				if msg.Status != StatusDelivered || msg.DeliveredAt == nil {
+					t.Fatal("message was not marked delivered")
+				}
+			})
+		}
+	}
+}
+
+func TestRunDelivery_WaitsForTerminalReady(t *testing.T) {
+	var buf threadSafeBuffer
+	var ready atomic.Bool
+	q := NewMessageQueue()
+	q.Enqueue(&Message{ID: "early", Body: "hello", Priority: PriorityNormal, Status: StatusQueued})
+	stop, done := make(chan struct{}), make(chan struct{})
+	delivered := make(chan struct{}, 2)
+	go func() {
+		defer close(done)
+		RunDelivery(DeliveryConfig{
+			Queue: q, PtyWriter: &buf, IsReady: ready.Load,
+			BracketedPaste: true, Stop: stop,
+			OnDeliver: func() { delivered <- struct{}{} },
+		})
+	}()
+	defer func() { close(stop); <-done }()
+	select {
+	case <-delivered:
+		t.Fatal("delivered before terminal readiness")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if buf.String() != "" || q.Snapshot().Total() != 1 {
+		t.Fatal("early input must remain queued, not written")
+	}
+	ready.Store(true)
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued input did not drain after readiness")
+	}
+	if got := buf.String(); got != "\x1b[200~hello\x1b[201~\r" {
+		t.Fatalf("expected exactly one paste and submit, got %q", got)
+	}
+}
+
+func TestRunDelivery_RawBypassesReadiness(t *testing.T) {
+	var buf threadSafeBuffer
+	q := NewMessageQueue()
+	EnqueueRaw(q, "2")
+	stop, done := make(chan struct{}), make(chan struct{})
+	delivered := make(chan struct{}, 1)
+	go func() {
+		defer close(done)
+		RunDelivery(DeliveryConfig{
+			Queue: q, PtyWriter: &buf, IsReady: func() bool { return false },
+			BracketedPaste: true, Stop: stop,
+			OnDeliver: func() { delivered <- struct{}{} },
+		})
+	}()
+	defer func() { close(stop); <-done }()
+	select {
+	case <-delivered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("raw replies to startup dialogs must remain possible")
+	}
+	if got := buf.String(); got != "2\r" {
+		t.Fatalf("raw bytes changed: %q", got)
+	}
 }
 
 func TestDeliver_RawInput(t *testing.T) {
