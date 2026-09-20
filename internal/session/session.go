@@ -888,7 +888,9 @@ func (s *Session) SubmitInput(text string, priority message.Priority) {
 }
 
 // readyForInput distinguishes Codex's non-submitting startup draft from its
-// live composer: the latter has a visible prompt cursor and a footer below it.
+// live composer. Both have a visible prompt cursor, but the startup draft
+// shows a loading header and/or bare shortcut hint and deliberately drops Enter.
+// A live composer may have no footer (e.g. git-branch outside a repository).
 // Cache per child so active turns and temporary overlays do not gate steering.
 func (s *Session) readyForInput() bool {
 	if s.RC.HarnessType != "codex" {
@@ -907,13 +909,23 @@ func (s *Session) readyForInput() bool {
 	if y < 0 || y >= len(vt.Content) || !strings.HasPrefix(strings.TrimSpace(string(vt.Content[y])), "›") {
 		return false
 	}
-	for _, row := range vt.Content[y+1:] {
-		if strings.TrimSpace(string(row)) != "" {
-			s.codexInputReady = true
-			return true
+	for _, row := range vt.Content[:y] {
+		line := strings.TrimSpace(string(row))
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[0] == "│" && fields[1] == "model:" && fields[2] == "loading" {
+			return false
+		}
+		if line == "Resuming session…" || line == "Forking session…" {
+			return false
 		}
 	}
-	return false
+	for _, row := range vt.Content[y+1:] {
+		if strings.TrimSpace(string(row)) == "? for shortcuts" {
+			return false
+		}
+	}
+	s.codexInputReady = true
+	return true
 }
 
 // StartServices launches the delivery goroutine. Blocks until Stop is called.
