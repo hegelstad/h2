@@ -692,6 +692,27 @@ func assertMutexAvailable(t *testing.T, mu *sync.Mutex) {
 	}
 }
 
+func TestScanPTYOutput_BracketedPaste(t *testing.T) {
+	var vt VT
+	vt.ScanPTYOutput([]byte("\x1b[?20"))
+	if vt.BracketedPasteEnabled {
+		t.Fatal("partial sequence must not enable bracketed paste")
+	}
+	vt.ScanPTYOutput([]byte("04h"))
+	if !vt.BracketedPasteEnabled {
+		t.Fatal("bracketed paste enable was not detected")
+	}
+	vt.ScanPTYOutput([]byte("\x1b[?2004l"))
+	if vt.BracketedPasteEnabled {
+		t.Fatal("bracketed paste disable was not detected")
+	}
+	vt.ScanPTYOutput([]byte("\x1b[?2004h"))
+	vt.ResetScanState()
+	if vt.BracketedPasteEnabled {
+		t.Fatal("a new child must negotiate bracketed paste again")
+	}
+}
+
 func TestResetScanState(t *testing.T) {
 	vt := &VT{}
 	vt.ScrollRegionUsed = true

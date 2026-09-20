@@ -48,6 +48,9 @@ type VT struct {
 	// to arrow key sequences instead of entering h2's scroll mode.
 	AltScrollEnabled bool
 
+	// BracketedPasteEnabled reports the child's DEC private mode 2004.
+	BracketedPasteEnabled bool
+
 	// SyncOutputActive is set when the child sends CSI ? 2026 h (begin
 	// synchronized update). When true, render callbacks in PipeOutput are
 	// suppressed until CSI ? 2026 l is received, so the screen is only
@@ -307,7 +310,8 @@ const (
 // ScanPTYOutput scans child output for escape sequences that affect rendering
 // behavior. Detects DECSTBM (CSI...r) to set ScrollRegionUsed,
 // DEC private mode 1007 (CSI?1007h/l) to toggle AltScrollEnabled, and
-// DEC private mode 2026 (CSI?2026h/l) to toggle SyncOutputActive.
+// DEC private mode 2026 (CSI?2026h/l) to toggle SyncOutputActive, and
+// DEC private mode 2004 (CSI?2004h/l) to toggle BracketedPasteEnabled.
 func (vt *VT) ScanPTYOutput(data []byte) {
 	for _, b := range data {
 		switch vt.scanState {
@@ -342,6 +346,8 @@ func (vt *VT) ScanPTYOutput(data []byte) {
 					vt.AltScrollEnabled = true
 				} else if vt.scanCSIPrivateNum == 2026 {
 					vt.SyncOutputActive = true
+				} else if vt.scanCSIPrivateNum == 2004 {
+					vt.BracketedPasteEnabled = true
 				}
 				vt.scanState = scanNormal
 			} else if b == 'l' {
@@ -349,6 +355,8 @@ func (vt *VT) ScanPTYOutput(data []byte) {
 					vt.AltScrollEnabled = false
 				} else if vt.scanCSIPrivateNum == 2026 {
 					vt.SyncOutputActive = false
+				} else if vt.scanCSIPrivateNum == 2004 {
+					vt.BracketedPasteEnabled = false
 				}
 				vt.scanState = scanNormal
 			} else {
@@ -381,6 +389,7 @@ func (vt *VT) ResetScanState() {
 	vt.ScrollRegionUsed = false
 	vt.AltScrollEnabled = false
 	vt.SyncOutputActive = false
+	vt.BracketedPasteEnabled = false
 }
 
 // RespondTerminalQueries responds to terminal capability queries from the

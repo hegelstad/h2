@@ -29,6 +29,8 @@ type DeliveryConfig struct {
 	Queue           *MessageQueue
 	AgentName       string
 	PtyWriter       io.Writer       // writes to the child PTY
+	BracketedPaste  bool            // frame non-raw text as one paste event
+	IsReady         func() bool     // optional terminal input readiness check
 	IsIdle          IdleFunc        // checks if child is idle
 	IsBlocked       IsBlockedFunc   // checks if agent is blocked (nil = never blocked)
 	WaitForIdle     WaitForIdleFunc // blocks until idle after a single interrupt
@@ -116,8 +118,9 @@ func RunDelivery(cfg DeliveryConfig) {
 		}
 
 		for {
-			idle := cfg.IsIdle != nil && cfg.IsIdle()
-			blocked := cfg.IsBlocked != nil && cfg.IsBlocked()
+			ready := cfg.IsReady == nil || cfg.IsReady()
+			idle := ready && cfg.IsIdle != nil && cfg.IsIdle()
+			blocked := !ready || (cfg.IsBlocked != nil && cfg.IsBlocked())
 			msg := cfg.Queue.Dequeue(idle, blocked)
 			if msg == nil {
 				break
@@ -152,19 +155,21 @@ func deliver(cfg DeliveryConfig, msg *Message) {
 		}
 	}
 
-	if msg.FilePath == "" {
-		// Raw user input — send body directly.
-		cfg.PtyWriter.Write([]byte(msg.Body))
-	} else {
+	line := msg.Body
+	if msg.FilePath != "" {
 		// Structured message — inline short messages, reference long ones.
-		var line string
 		if len(msg.Body) <= maxInlineBodyLen {
 			line = fmt.Sprintf("[%s] %s", msg.Header, msg.Body)
 		} else {
 			line = fmt.Sprintf("[%s] Read %s", msg.Header, msg.FilePath)
 		}
-		cfg.PtyWriter.Write([]byte(line))
 	}
+	if cfg.BracketedPaste && !msg.Raw {
+		// An explicit paste boundary keeps Codex's burst detection from treating
+		// the following Enter as pasted text when PTY reads are batched.
+		line = "\x1b[200~" + line + "\x1b[201~"
+	}
+	cfg.PtyWriter.Write([]byte(line))
 	// Delay before sending Enter so the child's UI framework can process
 	// the typed text before the submit (same pattern as user Enter).
 	time.Sleep(50 * time.Millisecond)
